@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Capstone DRaaS File Scanner</title>
+  </head>
+  <body>
+    <h1>Capstone – File Upload with Malware Scan</h1>
+
+    <form id="upload-form">
+      <input type="file" name="file" id="file-input" required />
+      <button type="submit">Upload</button>
+    </form>
+
+    <p id="upload-result"></p>
+
+    <div id="status-section" style="display:none;">
+      <h2>Scan Status</h2>
+      <p id="status-text">Checking…</p>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>
