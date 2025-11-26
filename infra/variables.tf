@@ -1,25 +1,21 @@
 variable "region" {
-  type    = string
-  default = "ca-central-1"
+  description = "AWS region for all resources"
+  type        = string
+  default     = "ca-central-1"
 }
 
 variable "app_name" {
-  type    = string
-  default = "allen-capstone"
+  description = "Prefix for resource names"
+  type        = string
+  default     = "allen-capstone"
 }
 
-variable "vpc_id" {
-  type = string
+variable "frontend_image" {
+  description = "ECR image URI for the frontend container"
+  type        = string
 }
 
-variable "public_subnet_ids" {
-  type = list(string)
-}
-
-variable "private_subnet_ids" {
-  type = list(string)
-}
-
-variable "db_subnet_ids" {
-  type = list(string)
+variable "backend_image" {
+  description = "ECR image URI for the backend container"
+  type        = string
 }
