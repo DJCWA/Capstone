@@ -2,8 +2,8 @@
 
 // IMPORTANT: align these with your Flask backend routes.
 // If your backend uses different paths, change them here.
-const API_UPLOAD_URL = "/upload";           // was "/api/upload" before
-const API_STATUS_URL = "/scan-status";      // adjust if your route name differs
+const API_UPLOAD_URL = "api/upload";           // was "/api/upload" before
+const API_STATUS_URL = "api/scan-status";      // adjust if your route name differs
 // Expecting GET /scan-status?file_id=... returning:
 // { file_id, file_name, status, detail, events: [{ timestamp, message }, ...] }
 
