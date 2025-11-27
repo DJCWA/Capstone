@@ -1,70 +1,94 @@
-from flask import Flask, request, jsonify
-import boto3
 import os
 import uuid
-from datetime import datetime
+
+import boto3
+from botocore.exceptions import ClientError
+from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-S3_BUCKET = os.environ.get("UPLOAD_BUCKET", "allen-capstone-uploads")
-S3 = boto3.client("s3")
+s3 = boto3.client("s3")
+UPLOAD_BUCKET = os.environ.get("UPLOAD_BUCKET")
 
-@app.route("/api/health", methods=["GET"])
+
+@app.get("/api/health")
 def health():
-    return jsonify({"status": "ok"}), 200
+    return jsonify({"status": "ok"})
 
-@app.route("/api/upload", methods=["POST"])
+
+@app.post("/api/upload")
 def upload_file():
     if "file" not in request.files:
-        return jsonify({"error": "No file uploaded"}), 400
+        return jsonify({"error": "no_file", "detail": "No file field in request"}), 400
 
     file = request.files["file"]
     if file.filename == "":
-        return jsonify({"error": "Empty filename"}), 400
+        return jsonify({"error": "empty_filename", "detail": "No file selected"}), 400
 
-    # basic validation
-    allowed_ext = {".pdf", ".docx", ".xlsx", ".png", ".jpg", ".zip"}
-    _, ext = os.path.splitext(file.filename.lower())
-    if ext not in allowed_ext:
-        return jsonify({"error": f"File type {ext} not allowed"}), 400
+    # Generate a unique key in S3
+    key = f"uploads/{uuid.uuid4()}_{file.filename}"
 
-    file_id = str(uuid.uuid4())
-    key = f"uploads/{file_id}-{file.filename}"
+    try:
+        # Reset stream position
+        file.stream.seek(0)
 
-    S3.upload_fileobj(
-        file,
-        S3_BUCKET,
-        key,
-        ExtraArgs={
-            "Metadata": {
+        s3.put_object(
+            Bucket=UPLOAD_BUCKET,
+            Key=key,
+            Body=file.stream.read(),
+            Metadata={
                 "scan_status": "PENDING",
-                "original_filename": file.filename
-            }
+                "scan_detail": "File uploaded; waiting for scanner Lambda…",
+            },
+        )
+    except ClientError as e:
+        return (
+            jsonify(
+                {
+                    "error": "upload_failed",
+                    "detail": str(e),
+                }
+            ),
+            500,
+        )
+
+    return jsonify(
+        {
+            "key": key,
+            "status": "PENDING",
+            "detail": "File uploaded successfully; scan will start shortly.",
         }
     )
 
-    # TODO: write metadata into RDS or DynamoDB (file_id, key, status=PENDING, timestamp, user_id, etc.)
 
-    return jsonify({"file_id": file_id, "message": "File uploaded, scanning in progress"}), 202
+@app.get("/api/status")
+def get_status():
+    key = request.args.get("key")
+    if not key:
+        return jsonify({"error": "missing_key", "detail": "key query parameter required"}), 400
 
-@app.route("/api/file-status/<file_id>", methods=["GET"])
-def file_status(file_id):
-    # In a real version you’d query DB by file_id
-    # For demo, scan S3 keys that start with file_id (inefficient but okay for capstone)
-    prefix = f"uploads/{file_id}-"
-    resp = S3.list_objects_v2(Bucket=S3_BUCKET, Prefix=prefix)
-    if "Contents" not in resp or len(resp["Contents"]) == 0:
-        return jsonify({"error": "File not found"}), 404
+    try:
+        head = s3.head_object(Bucket=UPLOAD_BUCKET, Key=key)
+    except ClientError:
+        # Object not found yet
+        return jsonify(
+            {
+                "status": "PENDING",
+                "detail": "File not found in bucket yet; waiting for upload to complete…",
+            }
+        )
 
-    key = resp["Contents"][0]["Key"]
-    head = S3.head_object(Bucket=S3_BUCKET, Key=key)
-    metadata = head.get("Metadata", {})
-    return jsonify({
-        "file_id": file_id,
-        "scan_status": metadata.get("scan_status", "UNKNOWN"),
-        "original_filename": metadata.get("original_filename", ""),
-        "last_checked": datetime.utcnow().isoformat() + "Z"
-    }), 200
+    md = head.get("Metadata", {}) or {}
+    status = md.get("scan_status", "PENDING")
+    detail = md.get("scan_detail") or "Waiting for scan to progress…"
+
+    return jsonify(
+        {
+            "status": status,
+            "detail": detail,
+        }
+    )
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080)

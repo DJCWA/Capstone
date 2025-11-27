@@ -1,24 +1,132 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <title>Capstone DRaaS File Scanner</title>
-  </head>
-  <body>
-    <h1>Capstone – File Upload with Malware Scan</h1>
+<head>
+  <meta charset="UTF-8" />
+  <title>Allen Capstone – File Upload Scan</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0f172a;
+      color: #e5e7eb;
+      padding: 2rem;
+    }
+    .card {
+      max-width: 600px;
+      margin: 0 auto;
+      background: #020617;
+      border-radius: 1rem;
+      padding: 1.5rem 2rem;
+      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
+      border: 1px solid #1f2937;
+    }
+    h1 {
+      font-size: 1.6rem;
+      margin-bottom: 0.25rem;
+    }
+    h2 {
+      font-size: 1.1rem;
+      margin-top: 1.5rem;
+      margin-bottom: 0.5rem;
+    }
+    p {
+      margin-top: 0;
+      margin-bottom: 0.75rem;
+      color: #9ca3af;
+    }
+    input[type="file"] {
+      margin-top: 0.75rem;
+      margin-bottom: 1rem;
+    }
+    button {
+      background: #22c55e;
+      border: none;
+      border-radius: 0.5rem;
+      padding: 0.5rem 1rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    .status {
+      margin-top: 1rem;
+      font-size: 0.95rem;
+    }
+    .status span.value {
+      font-weight: 600;
+    }
+    .log {
+      background: #020617;
+      border-radius: 0.5rem;
+      padding: 0.75rem;
+      border: 1px solid #1f2937;
+      max-height: 160px;
+      overflow-y: auto;
+      font-size: 0.85rem;
+    }
+    .log-entry {
+      margin-bottom: 0.25rem;
+    }
+    .log-entry span.time {
+      color: #64748b;
+      margin-right: 0.25rem;
+      font-size: 0.8rem;
+    }
+    .badge {
+      display: inline-block;
+      padding: 0.15rem 0.5rem;
+      border-radius: 999px;
+      font-size: 0.75rem;
+      margin-left: 0.25rem;
+    }
+    .badge.PENDING,
+    .badge.SCANNING {
+      background: #fbbf24;
+      color: #111827;
+    }
+    .badge.CLEAN {
+      background: #22c55e;
+      color: #022c22;
+    }
+    .badge.INFECTED {
+      background: #ef4444;
+      color: #7f1d1d;
+    }
+    .badge.ERROR {
+      background: #f97316;
+      color: #7c2d12;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Allen Capstone – Secure File Upload</h1>
+    <p>Files are scanned in real-time using a malware scanner running in AWS Lambda before they are considered safe.</p>
 
     <form id="upload-form">
-      <input type="file" name="file" id="file-input" required />
-      <button type="submit">Upload</button>
+      <label for="file-input"><strong>Select a file to upload and scan:</strong></label><br />
+      <input id="file-input" type="file" name="file" required />
+      <br />
+      <button type="submit" id="upload-button">Upload &amp; Scan</button>
     </form>
 
-    <p id="upload-result"></p>
-
-    <div id="status-section" style="display:none;">
-      <h2>Scan Status</h2>
-      <p id="status-text">Checking…</p>
+    <div class="status">
+      <div>
+        <strong>Status:</strong>
+        <span class="value" id="scan-status">No file uploaded</span>
+        <span id="scan-badge" class="badge" style="display:none;"></span>
+      </div>
+      <div id="scan-detail">Upload a file to start scanning.</div>
     </div>
 
-    <script src="app.js"></script>
-  </body>
+    <h2>Scan Events</h2>
+    <div id="scan-log" class="log">
+      <div class="log-entry">Waiting for first file upload…</div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
 </html>

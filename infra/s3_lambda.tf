@@ -12,7 +12,6 @@ resource "aws_s3_bucket" "uploads" {
   }
 }
 
-# NEW STYLE: separate versioning resource (no deprecation warning)
 resource "aws_s3_bucket_versioning" "uploads_versioning" {
   bucket = aws_s3_bucket.uploads.id
 
@@ -82,11 +81,12 @@ resource "aws_lambda_function" "scan" {
   filename      = data.archive_file.lambda_scan_zip.output_path
   timeout       = 60
   memory_size   = 1024
-
-  # If you’ve created the ClamAV layer already, add its ARN here:
-  # layers = [
-  #   "arn:aws:lambda:ca-central-1:123456789012:layer:allen-capstone-clamav:1"
-  # ]
+####################################################################
+  # TODO: replace this ARN with your real ClamAV Lambda layer ARN 
+#####################################################################
+  layers = [
+    "arn:aws:lambda:ca-central-1:448923944643:layer:allen-captone-clamav:1"
+  ]
 
   environment {
     variables = {}

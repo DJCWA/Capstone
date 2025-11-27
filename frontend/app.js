@@ -1,61 +1,143 @@
-const form = document.getElementById("upload-form");
-const resultEl = document.getElementById("upload-result");
-const statusSection = document.getElementById("status-section");
-const statusText = document.getElementById("status-text");
+let pollInterval = null;
+let lastDetail = null;
 
-let currentFileId = null;
+function appendLog(message) {
+  const logEl = document.getElementById("scan-log");
+  const entry = document.createElement("div");
+  entry.className = "log-entry";
 
-form.addEventListener("submit", async (e) => {
-  e.preventDefault();
+  const now = new Date();
+  const time = document.createElement("span");
+  time.className = "time";
+  time.textContent = now.toLocaleTimeString();
+
+  const text = document.createElement("span");
+  text.textContent = message;
+
+  entry.appendChild(time);
+  entry.appendChild(text);
+  logEl.appendChild(entry);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function updateBadge(status) {
+  const badge = document.getElementById("scan-badge");
+  if (!status) {
+    badge.style.display = "none";
+    return;
+  }
+  badge.style.display = "inline-block";
+  badge.textContent = status;
+  badge.className = "badge " + status;
+}
+
+async function pollStatus(fileKey) {
+  try {
+    const res = await fetch(`/api/status?key=${encodeURIComponent(fileKey)}`);
+    const data = await res.json();
+
+    const statusEl = document.getElementById("scan-status");
+    const detailEl = document.getElementById("scan-detail");
+
+    const status = data.status || "PENDING";
+    const detail = data.detail || "";
+
+    statusEl.textContent = status;
+    detailEl.textContent = detail;
+    updateBadge(status);
+
+    if (detail && detail !== lastDetail) {
+      appendLog(detail);
+      lastDetail = detail;
+    }
+
+    if (["CLEAN", "INFECTED", "ERROR"].includes(status)) {
+      if (pollInterval) {
+        clearInterval(pollInterval);
+        pollInterval = null;
+      }
+    }
+  } catch (err) {
+    console.error("Error polling status:", err);
+    appendLog("Error polling status from backend.");
+    const statusEl = document.getElementById("scan-status");
+    statusEl.textContent = "ERROR";
+    updateBadge("ERROR");
+    if (pollInterval) {
+      clearInterval(pollInterval);
+      pollInterval = null;
+    }
+  }
+}
+
+async function handleUpload(event) {
+  event.preventDefault();
 
   const fileInput = document.getElementById("file-input");
+  const button = document.getElementById("upload-button");
+  const statusEl = document.getElementById("scan-status");
+  const detailEl = document.getElementById("scan-detail");
+  const logEl = document.getElementById("scan-log");
+
   if (!fileInput.files.length) {
-    alert("Please select a file");
+    alert("Please select a file first.");
     return;
   }
+
+  const file = fileInput.files[0];
 
   const formData = new FormData();
-  formData.append("file", fileInput.files[0]);
+  formData.append("file", file);
 
-  resultEl.textContent = "Uploading...";
-  statusSection.style.display = "none";
+  button.disabled = true;
+  statusEl.textContent = "PENDING";
+  detailEl.textContent = "Uploading file to backend…";
+  updateBadge("PENDING");
+  logEl.innerHTML = "";
+  appendLog(`Starting upload of "${file.name}"…`);
 
-  const response = await fetch("/api/upload", {
-    method: "POST",
-    body: formData,
-  });
+  try {
+    const res = await fetch("/api/upload", {
+      method: "POST",
+      body: formData,
+    });
 
-  const data = await response.json();
-  if (!response.ok) {
-    resultEl.textContent = `Error: ${data.error || "Upload failed"}`;
-    return;
-  }
-
-  currentFileId = data.file_id;
-  resultEl.textContent = data.message;
-  statusSection.style.display = "block";
-  statusText.textContent = "Scanning...";
-
-  pollStatus();
-});
-
-async function pollStatus() {
-  if (!currentFileId) return;
-
-  const interval = setInterval(async () => {
-    const res = await fetch(`/api/file-status/${currentFileId}`);
     const data = await res.json();
+
     if (!res.ok) {
-      statusText.textContent = data.error || "Error checking status";
-      clearInterval(interval);
+      console.error("Upload failed:", data);
+      statusEl.textContent = "ERROR";
+      detailEl.textContent = data.detail || "Upload failed.";
+      updateBadge("ERROR");
+      appendLog(`Upload failed: ${data.detail || "Unknown error"}`);
+      button.disabled = false;
       return;
     }
 
-    const status = (data.scan_status || "UNKNOWN").toUpperCase();
-    statusText.textContent = `Scan Status: ${status}`;
+    const key = data.key;
+    statusEl.textContent = data.status || "PENDING";
+    detailEl.textContent = data.detail || "Waiting for scanner Lambda…";
+    updateBadge(data.status || "PENDING");
+    appendLog("File uploaded to S3. Waiting for scanner Lambda to start…");
 
-    if (status === "CLEAN" || status === "INFECTED" || status === "FAILED") {
-      clearInterval(interval);
+    lastDetail = null;
+
+    if (pollInterval) {
+      clearInterval(pollInterval);
     }
-  }, 5000);
+    pollInterval = setInterval(() => pollStatus(key), 2000);
+  } catch (err) {
+    console.error("Upload error:", err);
+    statusEl.textContent = "ERROR";
+    detailEl.textContent = "Unexpected error during upload.";
+    updateBadge("ERROR");
+    appendLog("Unexpected error during upload.");
+  } finally {
+    button.disabled = false;
+  }
 }
+
+document.addEventListener("DOMContentLoaded", () => {
+  const form = document.getElementById("upload-form");
+  form.addEventListener("submit", handleUpload);
+});
