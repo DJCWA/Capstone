@@ -81,9 +81,9 @@ resource "aws_lambda_function" "scan" {
   filename      = data.archive_file.lambda_scan_zip.output_path
   timeout       = 60
   memory_size   = 1024
-####################################################################
+  ####################################################################
   # TODO: replace this ARN with your real ClamAV Lambda layer ARN 
-#####################################################################
+  #####################################################################
   layers = [
     "arn:aws:lambda:ca-central-1:448923944643:layer:allen-captone-clamav:1"
   ]

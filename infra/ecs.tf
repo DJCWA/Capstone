@@ -20,7 +20,9 @@ resource "aws_lb" "app" {
   internal           = false
   load_balancer_type = "application"
   security_groups    = [aws_security_group.alb_sg.id]
-  subnets            = [
+
+  # Public subnets for the ALB
+  subnets = [
     aws_subnet.pubsub1.id,
     aws_subnet.pubsub2.id
   ]
@@ -30,16 +32,22 @@ resource "aws_lb" "app" {
   }
 }
 
-# Target groups
+# Target group for frontend (port 80)
 resource "aws_lb_target_group" "frontend_tg" {
   name        = "${var.app_name}-frontend-tg"
   port        = 80
   protocol    = "HTTP"
   vpc_id      = aws_vpc.main.id
-  target_type = "ip"  # IMPORTANT for Fargate/awsvpc
+  target_type = "ip" # IMPORTANT for Fargate/awsvpc
 
   health_check {
-    path = "/"
+    path                = "/"
+    protocol            = "HTTP"
+    matcher             = "200-399"
+    interval            = 30
+    timeout             = 5
+    healthy_threshold   = 2
+    unhealthy_threshold = 2
   }
 
   tags = {
@@ -47,15 +55,22 @@ resource "aws_lb_target_group" "frontend_tg" {
   }
 }
 
+# Target group for backend (port 8080)
 resource "aws_lb_target_group" "backend_tg" {
   name        = "${var.app_name}-backend-tg"
   port        = 8080
   protocol    = "HTTP"
   vpc_id      = aws_vpc.main.id
-  target_type = "ip"  # IMPORTANT for Fargate/awsvpc
+  target_type = "ip"
 
   health_check {
-    path = "/api/health"
+    path                = "/api/health"
+    protocol            = "HTTP"
+    matcher             = "200-399"
+    interval            = 30
+    timeout             = 5
+    healthy_threshold   = 2
+    unhealthy_threshold = 2
   }
 
   tags = {
@@ -63,7 +78,7 @@ resource "aws_lb_target_group" "backend_tg" {
   }
 }
 
-# Listener: default to frontend
+# HTTP listener (port 80)
 resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.app.arn
   port              = 80
@@ -75,7 +90,7 @@ resource "aws_lb_listener" "http" {
   }
 }
 
-# Route /api/* to backend target group
+# Route /api/* to backend service
 resource "aws_lb_listener_rule" "backend_rule" {
   listener_arn = aws_lb_listener.http.arn
   priority     = 10
@@ -93,10 +108,9 @@ resource "aws_lb_listener_rule" "backend_rule" {
 }
 
 ########################
-# IAM Roles for ECS Tasks
+# IAM for ECS Tasks
 ########################
 
-# Trust policy for ECS tasks (used by both exec & task roles)
 data "aws_iam_policy_document" "ecs_task_assume_role" {
   statement {
     actions = ["sts:AssumeRole"]
@@ -108,7 +122,7 @@ data "aws_iam_policy_document" "ecs_task_assume_role" {
   }
 }
 
-# Execution role: lets ECS pull from ECR, send logs, etc.
+# Execution role: allows ECS to pull from ECR, write logs, etc.
 resource "aws_iam_role" "ecs_task_execution_role" {
   name               = "${var.app_name}-ecs-task-exec-role"
   assume_role_policy = data.aws_iam_policy_document.ecs_task_assume_role.json
@@ -119,22 +133,29 @@ resource "aws_iam_role_policy_attachment" "ecs_task_exec_policy" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
-# Task role: permissions for the app containers (backend needs S3)
+# Task role: permissions needed by backend app (S3 + DynamoDB)
 resource "aws_iam_role" "ecs_task_role" {
   name               = "${var.app_name}-ecs-task-role"
   assume_role_policy = data.aws_iam_policy_document.ecs_task_assume_role.json
 }
 
+# S3 access so backend can generate pre-signed URLs etc.
 resource "aws_iam_role_policy_attachment" "ecs_task_s3_policy" {
   role       = aws_iam_role.ecs_task_role.name
   policy_arn = "arn:aws:iam::aws:policy/AmazonS3FullAccess"
+}
+
+# DynamoDB access so backend can store scan results
+resource "aws_iam_role_policy_attachment" "ecs_task_dynamodb_policy" {
+  role       = aws_iam_role.ecs_task_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess"
 }
 
 ########################
 # Task Definitions
 ########################
 
-# FRONTEND task definition (Nginx serving static files)
+# FRONTEND task definition (Nginx/static site)
 resource "aws_ecs_task_definition" "frontend" {
   family                   = "${var.app_name}-frontend"
   network_mode             = "awsvpc"
@@ -143,7 +164,6 @@ resource "aws_ecs_task_definition" "frontend" {
   memory                   = "512"
 
   execution_role_arn = aws_iam_role.ecs_task_execution_role.arn
-  # frontend doesn't need AWS APIs, so no task_role_arn required
 
   container_definitions = jsonencode([
     {
@@ -164,7 +184,7 @@ resource "aws_ecs_task_definition" "frontend" {
   }
 }
 
-# BACKEND task definition (Flask app using S3)
+# BACKEND task definition (Flask API)
 resource "aws_ecs_task_definition" "backend" {
   family                   = "${var.app_name}-backend"
   network_mode             = "awsvpc"
@@ -192,6 +212,10 @@ resource "aws_ecs_task_definition" "backend" {
         {
           name  = "UPLOAD_BUCKET"
           value = aws_s3_bucket.uploads.bucket
+        },
+        {
+          name  = "SCAN_TABLE"
+          value = aws_dynamodb_table.scan_results.name
         }
       ]
     }
@@ -215,7 +239,10 @@ resource "aws_ecs_service" "frontend" {
   launch_type     = "FARGATE"
 
   network_configuration {
-    subnets          = [aws_subnet.prisub1.id, aws_subnet.prisub2.id]
+    subnets = [
+      aws_subnet.prisub1.id,
+      aws_subnet.prisub2.id
+    ]
     security_groups  = [aws_security_group.ecs_tasks_sg.id]
     assign_public_ip = false
   }
@@ -242,7 +269,10 @@ resource "aws_ecs_service" "backend" {
   launch_type     = "FARGATE"
 
   network_configuration {
-    subnets          = [aws_subnet.prisub1.id, aws_subnet.prisub2.id]
+    subnets = [
+      aws_subnet.prisub1.id,
+      aws_subnet.prisub2.id
+    ]
     security_groups  = [aws_security_group.ecs_tasks_sg.id]
     assign_public_ip = false
   }
