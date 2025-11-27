@@ -2,131 +2,105 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>Allen Capstone – File Upload Scan</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <style>
-    body {
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background: #0f172a;
-      color: #e5e7eb;
-      padding: 2rem;
-    }
-    .card {
-      max-width: 600px;
-      margin: 0 auto;
-      background: #020617;
-      border-radius: 1rem;
-      padding: 1.5rem 2rem;
-      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
-      border: 1px solid #1f2937;
-    }
-    h1 {
-      font-size: 1.6rem;
-      margin-bottom: 0.25rem;
-    }
-    h2 {
-      font-size: 1.1rem;
-      margin-top: 1.5rem;
-      margin-bottom: 0.5rem;
-    }
-    p {
-      margin-top: 0;
-      margin-bottom: 0.75rem;
-      color: #9ca3af;
-    }
-    input[type="file"] {
-      margin-top: 0.75rem;
-      margin-bottom: 1rem;
-    }
-    button {
-      background: #22c55e;
-      border: none;
-      border-radius: 0.5rem;
-      padding: 0.5rem 1rem;
-      font-weight: 600;
-      cursor: pointer;
-    }
-    button:disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
-    }
-    .status {
-      margin-top: 1rem;
-      font-size: 0.95rem;
-    }
-    .status span.value {
-      font-weight: 600;
-    }
-    .log {
-      background: #020617;
-      border-radius: 0.5rem;
-      padding: 0.75rem;
-      border: 1px solid #1f2937;
-      max-height: 160px;
-      overflow-y: auto;
-      font-size: 0.85rem;
-    }
-    .log-entry {
-      margin-bottom: 0.25rem;
-    }
-    .log-entry span.time {
-      color: #64748b;
-      margin-right: 0.25rem;
-      font-size: 0.8rem;
-    }
-    .badge {
-      display: inline-block;
-      padding: 0.15rem 0.5rem;
-      border-radius: 999px;
-      font-size: 0.75rem;
-      margin-left: 0.25rem;
-    }
-    .badge.PENDING,
-    .badge.SCANNING {
-      background: #fbbf24;
-      color: #111827;
-    }
-    .badge.CLEAN {
-      background: #22c55e;
-      color: #022c22;
-    }
-    .badge.INFECTED {
-      background: #ef4444;
-      color: #7f1d1d;
-    }
-    .badge.ERROR {
-      background: #f97316;
-      color: #7c2d12;
-    }
-  </style>
+  <title>Allen Capstone – Secure File Upload & Scan</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <div class="card">
-    <h1>Allen Capstone – Secure File Upload</h1>
-    <p>Files are scanned in real-time using a malware scanner running in AWS Lambda before they are considered safe.</p>
-
-    <form id="upload-form">
-      <label for="file-input"><strong>Select a file to upload and scan:</strong></label><br />
-      <input id="file-input" type="file" name="file" required />
-      <br />
-      <button type="submit" id="upload-button">Upload &amp; Scan</button>
-    </form>
-
-    <div class="status">
-      <div>
-        <strong>Status:</strong>
-        <span class="value" id="scan-status">No file uploaded</span>
-        <span id="scan-badge" class="badge" style="display:none;"></span>
+  <div class="app-shell">
+    <header class="app-header">
+      <div class="app-brand">
+        <div class="brand-icon">AC</div>
+        <div>
+          <h1>Allen Capstone</h1>
+          <p>Secure File Upload · Malware Scanning · DRaaS on AWS</p>
+        </div>
       </div>
-      <div id="scan-detail">Upload a file to start scanning.</div>
-    </div>
+    </header>
 
-    <h2>Scan Events</h2>
-    <div id="scan-log" class="log">
-      <div class="log-entry">Waiting for first file upload…</div>
-    </div>
+    <main class="app-main">
+      <section class="card card-upload">
+        <h2>Upload a file to scan</h2>
+        <p class="subtitle">
+          Files are stored in S3, scanned by ClamAV in Lambda, and results are
+          logged to DynamoDB.
+        </p>
+
+        <form id="uploadForm" class="upload-form">
+          <label for="fileInput" class="dropzone" id="dropzone">
+            <div class="dropzone-inner">
+              <div class="dropzone-icon">📁</div>
+              <div>
+                <p class="dropzone-title">Click to browse or drag &amp; drop</p>
+                <p class="dropzone-subtitle">Supported: any file type (demo)</p>
+              </div>
+            </div>
+            <input id="fileInput" type="file" name="file" hidden />
+          </label>
+
+          <button type="submit" class="btn-primary" id="uploadButton">
+            Upload &amp; Scan
+          </button>
+        </form>
+
+        <p class="hint">
+          For your demo: upload a harmless test file to show a CLEAN result,
+          and use AWS logs to demonstrate detection of the EICAR test string.
+        </p>
+      </section>
+
+      <section class="layout-two-column">
+        <section class="card card-status">
+          <div class="card-header-row">
+            <h2>Current file status</h2>
+            <span class="status-pill status-idle" id="statusPill">IDLE</span>
+          </div>
+
+          <dl class="status-details">
+            <div>
+              <dt>File name</dt>
+              <dd id="fileName">—</dd>
+            </div>
+            <div>
+              <dt>File ID</dt>
+              <dd id="fileId">—</dd>
+            </div>
+            <div>
+              <dt>Scan status</dt>
+              <dd id="statusText">Waiting for upload…</dd>
+            </div>
+            <div>
+              <dt>Scan detail</dt>
+              <dd id="detailText">—</dd>
+            </div>
+          </dl>
+        </section>
+
+        <section class="card card-events">
+          <div class="card-header-row">
+            <h2>Scan events</h2>
+            <button class="btn-ghost" id="clearEventsButton" type="button">
+              Clear
+            </button>
+          </div>
+
+          <div class="events-log" id="eventsLog">
+            <p class="events-empty">
+              No events yet. Upload a file to see the scan progress here.
+            </p>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <footer class="app-footer">
+      <p>
+        Deployed on AWS ECS Fargate · S3 · Lambda (ClamAV) · DynamoDB ·
+        CI/CD via GitHub Actions &amp; ECR
+      </p>
+    </footer>
   </div>
 
-  <script src="app.js"></script>
+  <script src="app.js" defer></script>
 </body>
 </html>

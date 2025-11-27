@@ -1,143 +1,277 @@
-let pollInterval = null;
-let lastDetail = null;
+// frontend/app.js
 
-function appendLog(message) {
-  const logEl = document.getElementById("scan-log");
-  const entry = document.createElement("div");
-  entry.className = "log-entry";
+// Adjust these if your backend endpoints differ
+const API_BASE = "/api";
+const API_UPLOAD_URL = `${API_BASE}/upload`;
+const API_STATUS_URL = `${API_BASE}/scan-status`;
+// Expecting GET /api/scan-status?file_id=... returning
+// { file_id, file_name, status, detail, events: [{ timestamp, message }, ...] }
 
-  const now = new Date();
-  const time = document.createElement("span");
-  time.className = "time";
-  time.textContent = now.toLocaleTimeString();
+const POLL_INTERVAL_MS = 3000;
 
-  const text = document.createElement("span");
-  text.textContent = message;
+let currentFileId = null;
+let pollTimer = null;
 
-  entry.appendChild(time);
-  entry.appendChild(text);
-  logEl.appendChild(entry);
-  logEl.scrollTop = logEl.scrollHeight;
-}
+document.addEventListener("DOMContentLoaded", () => {
+  const uploadForm = document.getElementById("uploadForm");
+  const fileInput = document.getElementById("fileInput");
+  const dropzone = document.getElementById("dropzone");
+  const uploadButton = document.getElementById("uploadButton");
+  const clearEventsButton = document.getElementById("clearEventsButton");
 
-function updateBadge(status) {
-  const badge = document.getElementById("scan-badge");
-  if (!status) {
-    badge.style.display = "none";
-    return;
-  }
-  badge.style.display = "inline-block";
-  badge.textContent = status;
-  badge.className = "badge " + status;
-}
+  const statusPill = document.getElementById("statusPill");
+  const fileNameEl = document.getElementById("fileName");
+  const fileIdEl = document.getElementById("fileId");
+  const statusTextEl = document.getElementById("statusText");
+  const detailTextEl = document.getElementById("detailText");
+  const eventsLogEl = document.getElementById("eventsLog");
 
-async function pollStatus(fileKey) {
-  try {
-    const res = await fetch(`/api/status?key=${encodeURIComponent(fileKey)}`);
-    const data = await res.json();
+  function setStatusPill(status) {
+    const normalized = (status || "IDLE").toUpperCase();
 
-    const statusEl = document.getElementById("scan-status");
-    const detailEl = document.getElementById("scan-detail");
+    const baseClasses = ["status-pill"];
+    let variantClass = "status-idle";
+    let label = normalized;
 
-    const status = data.status || "PENDING";
-    const detail = data.detail || "";
-
-    statusEl.textContent = status;
-    detailEl.textContent = detail;
-    updateBadge(status);
-
-    if (detail && detail !== lastDetail) {
-      appendLog(detail);
-      lastDetail = detail;
+    switch (normalized) {
+      case "PENDING":
+        variantClass = "status-pending";
+        label = "PENDING";
+        break;
+      case "SCANNING":
+        variantClass = "status-scanning";
+        label = "SCANNING";
+        break;
+      case "CLEAN":
+        variantClass = "status-clean";
+        label = "CLEAN";
+        break;
+      case "INFECTED":
+        variantClass = "status-infected";
+        label = "INFECTED";
+        break;
+      default:
+        variantClass = "status-idle";
+        label = "IDLE";
     }
 
-    if (["CLEAN", "INFECTED", "ERROR"].includes(status)) {
-      if (pollInterval) {
-        clearInterval(pollInterval);
-        pollInterval = null;
-      }
-    }
-  } catch (err) {
-    console.error("Error polling status:", err);
-    appendLog("Error polling status from backend.");
-    const statusEl = document.getElementById("scan-status");
-    statusEl.textContent = "ERROR";
-    updateBadge("ERROR");
-    if (pollInterval) {
-      clearInterval(pollInterval);
-      pollInterval = null;
-    }
-  }
-}
-
-async function handleUpload(event) {
-  event.preventDefault();
-
-  const fileInput = document.getElementById("file-input");
-  const button = document.getElementById("upload-button");
-  const statusEl = document.getElementById("scan-status");
-  const detailEl = document.getElementById("scan-detail");
-  const logEl = document.getElementById("scan-log");
-
-  if (!fileInput.files.length) {
-    alert("Please select a file first.");
-    return;
+    statusPill.className = [...baseClasses, variantClass].join(" ");
+    statusPill.textContent = label;
   }
 
-  const file = fileInput.files[0];
+  function clearEvents() {
+    eventsLogEl.innerHTML =
+      '<p class="events-empty">Events cleared. Upload again to see new activity.</p>';
+  }
 
-  const formData = new FormData();
-  formData.append("file", file);
-
-  button.disabled = true;
-  statusEl.textContent = "PENDING";
-  detailEl.textContent = "Uploading file to backend…";
-  updateBadge("PENDING");
-  logEl.innerHTML = "";
-  appendLog(`Starting upload of "${file.name}"…`);
-
-  try {
-    const res = await fetch("/api/upload", {
-      method: "POST",
-      body: formData,
-    });
-
-    const data = await res.json();
-
-    if (!res.ok) {
-      console.error("Upload failed:", data);
-      statusEl.textContent = "ERROR";
-      detailEl.textContent = data.detail || "Upload failed.";
-      updateBadge("ERROR");
-      appendLog(`Upload failed: ${data.detail || "Unknown error"}`);
-      button.disabled = false;
+  function renderEvents(events) {
+    if (!events || events.length === 0) {
+      clearEvents();
       return;
     }
 
-    const key = data.key;
-    statusEl.textContent = data.status || "PENDING";
-    detailEl.textContent = data.detail || "Waiting for scanner Lambda…";
-    updateBadge(data.status || "PENDING");
-    appendLog("File uploaded to S3. Waiting for scanner Lambda to start…");
+    const items = events
+      .map((evt) => {
+        const time =
+          evt.timestamp ||
+          new Date().toISOString().replace("T", " ").slice(0, 19);
+        const msg = evt.message || String(evt);
+        return `
+          <div class="event-item">
+            <div class="event-meta">
+              <span>${time}</span>
+            </div>
+            <div class="event-message">${escapeHtml(msg)}</div>
+          </div>
+        `;
+      })
+      .join("");
 
-    lastDetail = null;
-
-    if (pollInterval) {
-      clearInterval(pollInterval);
-    }
-    pollInterval = setInterval(() => pollStatus(key), 2000);
-  } catch (err) {
-    console.error("Upload error:", err);
-    statusEl.textContent = "ERROR";
-    detailEl.textContent = "Unexpected error during upload.";
-    updateBadge("ERROR");
-    appendLog("Unexpected error during upload.");
-  } finally {
-    button.disabled = false;
+    eventsLogEl.innerHTML = items;
   }
-}
 
-document.addEventListener("DOMContentLoaded", () => {
-  const form = document.getElementById("upload-form");
-  form.addEventListener("submit", handleUpload);
+  function setLoading(isLoading) {
+    uploadButton.disabled = isLoading;
+    uploadButton.textContent = isLoading ? "Uploading & scanning…" : "Upload & Scan";
+  }
+
+  function resetStatus() {
+    currentFileId = null;
+    clearInterval(pollTimer);
+    pollTimer = null;
+
+    fileNameEl.textContent = "—";
+    fileIdEl.textContent = "—";
+    statusTextEl.textContent = "Waiting for upload…";
+    detailTextEl.textContent = "—";
+    setStatusPill("IDLE");
+    clearEvents();
+  }
+
+  async function handleUpload(evt) {
+    evt.preventDefault();
+    if (!fileInput.files || fileInput.files.length === 0) {
+      alert("Please choose a file to upload.");
+      return;
+    }
+
+    const file = fileInput.files[0];
+    setLoading(true);
+    clearInterval(pollTimer);
+    pollTimer = null;
+    clearEvents();
+
+    fileNameEl.textContent = file.name;
+    statusTextEl.textContent = "Uploading file to backend…";
+    detailTextEl.textContent = "—";
+    setStatusPill("PENDING");
+
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+
+      const resp = await fetch(API_UPLOAD_URL, {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!resp.ok) {
+        throw new Error(`Upload failed with status ${resp.status}`);
+      }
+
+      const data = await resp.json();
+      const fileId = data.file_id || data.id || null;
+
+      if (!fileId) {
+        throw new Error("Backend response missing file_id.");
+      }
+
+      currentFileId = fileId;
+      fileIdEl.textContent = fileId;
+      statusTextEl.textContent = "File uploaded. Waiting for scan to start…";
+      appendEvent({
+        message: "File uploaded successfully. Scan will start shortly.",
+      });
+
+      // Start polling
+      setStatusPill("PENDING");
+      pollTimer = setInterval(pollStatus, POLL_INTERVAL_MS);
+      // Fire first poll immediately
+      pollStatus();
+    } catch (err) {
+      console.error(err);
+      statusTextEl.textContent = "Upload failed.";
+      detailTextEl.textContent = err.message || String(err);
+      setStatusPill("IDLE");
+      appendEvent({ message: "Upload failed – see details above." });
+    } finally {
+      setLoading(false);
+      // Clear selection so user can re-upload same file if needed
+      uploadForm.reset();
+    }
+  }
+
+  async function pollStatus() {
+    if (!currentFileId) return;
+
+    try {
+      const url = `${API_STATUS_URL}?file_id=${encodeURIComponent(currentFileId)}`;
+      const resp = await fetch(url);
+      if (!resp.ok) {
+        throw new Error(`Status check failed with ${resp.status}`);
+      }
+
+      const data = await resp.json();
+      const status = (data.status || "PENDING").toUpperCase();
+      const detail = data.detail || data.scan_detail || "—";
+
+      statusTextEl.textContent = status;
+      detailTextEl.textContent = detail;
+      setStatusPill(status);
+
+      if (data.file_name) {
+        fileNameEl.textContent = data.file_name;
+      }
+      if (data.file_id) {
+        fileIdEl.textContent = data.file_id;
+      }
+
+      if (Array.isArray(data.events)) {
+        renderEvents(data.events);
+      }
+
+      // Stop polling on terminal states
+      if (status === "CLEAN" || status === "INFECTED" || status === "FAILED") {
+        clearInterval(pollTimer);
+        pollTimer = null;
+        appendEvent({
+          message: `Scan finished with status: ${status}.`,
+        });
+      }
+    } catch (err) {
+      console.error(err);
+      appendEvent({
+        message: `Error checking scan status: ${err.message || String(err)}`,
+      });
+    }
+  }
+
+  function appendEvent(evt) {
+    const existingEmpty = eventsLogEl.querySelector(".events-empty");
+    if (existingEmpty) existingEmpty.remove();
+
+    const time = new Date().toISOString().replace("T", " ").slice(0, 19);
+    const msg = evt.message || String(evt);
+
+    const wrapper = document.createElement("div");
+    wrapper.className = "event-item";
+    wrapper.innerHTML = `
+      <div class="event-meta">
+        <span>${time}</span>
+      </div>
+      <div class="event-message">${escapeHtml(msg)}</div>
+    `;
+
+    eventsLogEl.appendChild(wrapper);
+    eventsLogEl.scrollTop = eventsLogEl.scrollHeight;
+  }
+
+  function escapeHtml(str) {
+    return String(str)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#039;");
+  }
+
+  // Drag & drop enhancements for the dropzone
+  dropzone.addEventListener("click", () => fileInput.click());
+
+  dropzone.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    dropzone.classList.add("dropzone-hover");
+  });
+
+  dropzone.addEventListener("dragleave", (e) => {
+    e.preventDefault();
+    dropzone.classList.remove("dropzone-hover");
+  });
+
+  dropzone.addEventListener("drop", (e) => {
+    e.preventDefault();
+    dropzone.classList.remove("dropzone-hover");
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      fileInput.files = e.dataTransfer.files;
+    }
+  });
+
+  clearEventsButton.addEventListener("click", () => {
+    clearEvents();
+  });
+
+  uploadForm.addEventListener("submit", handleUpload);
+
+  // Initialize
+  resetStatus();
 });
