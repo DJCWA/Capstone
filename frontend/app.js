@@ -1,10 +1,10 @@
 // frontend/app.js
 
-// Adjust these if your backend endpoints differ
-const API_BASE = "/api";
-const API_UPLOAD_URL = `${API_BASE}/upload`;
-const API_STATUS_URL = `${API_BASE}/scan-status`;
-// Expecting GET /api/scan-status?file_id=... returning
+// IMPORTANT: align these with your Flask backend routes.
+// If your backend uses different paths, change them here.
+const API_UPLOAD_URL = "/upload";           // was "/api/upload" before
+const API_STATUS_URL = "/scan-status";      // adjust if your route name differs
+// Expecting GET /scan-status?file_id=... returning:
 // { file_id, file_name, status, detail, events: [{ timestamp, message }, ...] }
 
 const POLL_INTERVAL_MS = 3000;
@@ -135,11 +135,26 @@ document.addEventListener("DOMContentLoaded", () => {
         body: formData,
       });
 
+      const responseText = await resp.text(); // read text once
+
       if (!resp.ok) {
-        throw new Error(`Upload failed with status ${resp.status}`);
+        // Try to parse JSON if possible, otherwise show raw text
+        let extraDetail = responseText;
+        try {
+          const maybeJson = JSON.parse(responseText);
+          if (maybeJson.detail || maybeJson.error) {
+            extraDetail = maybeJson.detail || maybeJson.error;
+          }
+        } catch (_) {
+          // ignore JSON parse error, keep extraDetail as raw text
+        }
+        throw new Error(
+          `Upload failed with status ${resp.status}. Backend said: ${extraDetail}`
+        );
       }
 
-      const data = await resp.json();
+      // If response was JSON, parse it again from the text we already have
+      const data = JSON.parse(responseText || "{}");
       const fileId = data.file_id || data.id || null;
 
       if (!fileId) {
@@ -177,11 +192,15 @@ document.addEventListener("DOMContentLoaded", () => {
     try {
       const url = `${API_STATUS_URL}?file_id=${encodeURIComponent(currentFileId)}`;
       const resp = await fetch(url);
+      const responseText = await resp.text();
+
       if (!resp.ok) {
-        throw new Error(`Status check failed with ${resp.status}`);
+        throw new Error(
+          `Status check failed with ${resp.status}. Body: ${responseText}`
+        );
       }
 
-      const data = await resp.json();
+      const data = JSON.parse(responseText || "{}");
       const status = (data.status || "PENDING").toUpperCase();
       const detail = data.detail || data.scan_detail || "—";
 
