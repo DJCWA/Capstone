@@ -10,11 +10,11 @@ env:
   APP_NAME: allen-capstone
 
 jobs:
-  build-and-push:
+  build-and-deploy:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout repo
         uses: actions/checkout@v4
 
       - name: Configure AWS Credentials
@@ -28,32 +28,36 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
+      # Backend image
       - name: Build & push backend image
         run: |
           BACKEND_REPO=${{ steps.login-ecr.outputs.registry }}/${APP_NAME}-backend
+          echo "Building backend: $BACKEND_REPO:latest"
           docker build -t $BACKEND_REPO:latest ./backend
           docker push $BACKEND_REPO:latest
-          echo "BACKEND_IMAGE=$BACKEND_REPO:latest" >> $GITHUB_ENV
 
+      # Frontend image
       - name: Build & push frontend image
         run: |
           FRONTEND_REPO=${{ steps.login-ecr.outputs.registry }}/${APP_NAME}-frontend
+          echo "Building frontend: $FRONTEND_REPO:latest"
           docker build -t $FRONTEND_REPO:latest ./frontend
           docker push $FRONTEND_REPO:latest
-          echo "FRONTEND_IMAGE=$FRONTEND_REPO:latest" >> $GITHUB_ENV
 
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: 1.9.0
+      # Kick ECS to redeploy BACKEND using the same task def (image tag is :latest)
+      - name: Force new deployment - backend
+        run: |
+          aws ecs update-service \
+            --cluster ${APP_NAME}-ecs-cluster \
+            --service ${APP_NAME}-backend-svc \
+            --force-new-deployment \
+            --region ${AWS_REGION}
 
-      - name: Terraform Init
-        working-directory: infra
-        run: terraform init -input=false
-
-      - name: Terraform Apply
-        working-directory: infra
-        env:
-          TF_VAR_frontend_image: ${{ env.FRONTEND_IMAGE }}
-          TF_VAR_backend_image:  ${{ env.BACKEND_IMAGE }}
-        run: terraform apply -auto-approve -input=false
+      # And FRONTEND
+      - name: Force new deployment - frontend
+        run: |
+          aws ecs update-service \
+            --cluster ${APP_NAME}-ecs-cluster \
+            --service ${APP_NAME}-frontend-svc \
+            --force-new-deployment \
+            --region ${AWS_REGION}
