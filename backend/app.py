@@ -1,94 +1,201 @@
 import os
 import uuid
+import logging
+import datetime as dt
 
-import boto3
-from botocore.exceptions import ClientError
 from flask import Flask, request, jsonify
+import boto3
+from botocore.exceptions import BotoCoreError, ClientError
+
+# ------------------------------------------------------------------------------
+# Basic Flask + logging setup
+# ------------------------------------------------------------------------------
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
+# ------------------------------------------------------------------------------
+# AWS config – these MUST match your ECS task environment variables
+# ------------------------------------------------------------------------------
+
+UPLOAD_BUCKET = os.environ.get("UPLOAD_BUCKET")  # S3 bucket for uploaded files
+SCAN_TABLE = os.environ.get("SCAN_TABLE")        # DynamoDB table for scan records
+
+if not UPLOAD_BUCKET:
+    logger.warning("UPLOAD_BUCKET env var is not set – uploads will fail until this is configured.")
+if not SCAN_TABLE:
+    logger.warning("SCAN_TABLE env var is not set – scan-status will fail until this is configured.")
+
 s3 = boto3.client("s3")
-UPLOAD_BUCKET = os.environ.get("UPLOAD_BUCKET")
+dynamodb = boto3.resource("dynamodb")
 
+def get_scan_table():
+    if not SCAN_TABLE:
+        raise RuntimeError("SCAN_TABLE env var not set in backend container.")
+    return dynamodb.Table(SCAN_TABLE)
 
-@app.get("/api/health")
+# ------------------------------------------------------------------------------
+# Helper: build consistent JSON error responses
+# ------------------------------------------------------------------------------
+
+def error_response(message: str, status_code: int = 500):
+    logger.error("API error (%s): %s", status_code, message)
+    return jsonify({"error": message}), status_code
+
+# ------------------------------------------------------------------------------
+# Route: health check (good for debugging)
+# ------------------------------------------------------------------------------
+
+@app.route("/api/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok"})
+    return jsonify({"status": "ok", "upload_bucket": UPLOAD_BUCKET, "scan_table": SCAN_TABLE})
 
+# ------------------------------------------------------------------------------
+# Route: /api/upload – receives file, stores to S3, creates PENDING record in DynamoDB
+# ------------------------------------------------------------------------------
 
-@app.post("/api/upload")
+@app.route("/api/upload", methods=["POST"])
 def upload_file():
-    if "file" not in request.files:
-        return jsonify({"error": "no_file", "detail": "No file field in request"}), 400
-
-    file = request.files["file"]
-    if file.filename == "":
-        return jsonify({"error": "empty_filename", "detail": "No file selected"}), 400
-
-    # Generate a unique key in S3
-    key = f"uploads/{uuid.uuid4()}_{file.filename}"
-
     try:
-        # Reset stream position
-        file.stream.seek(0)
+        if not UPLOAD_BUCKET:
+            return error_response("UPLOAD_BUCKET env var is not configured on backend service.", 500)
 
-        s3.put_object(
-            Bucket=UPLOAD_BUCKET,
-            Key=key,
-            Body=file.stream.read(),
-            Metadata={
-                "scan_status": "PENDING",
-                "scan_detail": "File uploaded; waiting for scanner Lambda…",
-            },
-        )
-    except ClientError as e:
-        return (
-            jsonify(
-                {
-                    "error": "upload_failed",
-                    "detail": str(e),
+        if "file" not in request.files:
+            return error_response("No file part in request. Expected field name 'file'.", 400)
+
+        file_storage = request.files["file"]
+        if file_storage.filename == "":
+            return error_response("Empty filename – please select a file.", 400)
+
+        original_name = file_storage.filename
+        file_id = str(uuid.uuid4())
+        s3_key = f"uploads/{file_id}/{original_name}"
+
+        logger.info("Uploading file to S3: bucket=%s key=%s", UPLOAD_BUCKET, s3_key)
+
+        # Upload file to S3
+        try:
+            s3.upload_fileobj(
+                Fileobj=file_storage,
+                Bucket=UPLOAD_BUCKET,
+                Key=s3_key,
+                ExtraArgs={"ServerSideEncryption": "AES256"},
+            )
+        except (BotoCoreError, ClientError) as e:
+            logger.exception("Failed to upload file to S3.")
+            return error_response(f"Failed to upload file to S3: {e}", 500)
+
+        # Create PENDING scan record in DynamoDB
+        try:
+            table = get_scan_table()
+            now_iso = dt.datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            table.put_item(
+                Item={
+                    "file_id": file_id,
+                    "file_name": original_name,
+                    "s3_bucket": UPLOAD_BUCKET,
+                    "s3_key": s3_key,
+                    "scan_status": "PENDING",
+                    "scan_detail": "Waiting for Lambda scanner to run.",
+                    "scan_events": [
+                        {
+                            "timestamp": now_iso,
+                            "message": "File uploaded to S3 and scan record created.",
+                        }
+                    ],
+                    "created_at": now_iso,
+                    "updated_at": now_iso,
                 }
-            ),
-            500,
-        )
+            )
+        except (BotoCoreError, ClientError, RuntimeError) as e:
+            logger.exception("Failed to write scan record to DynamoDB.")
+            return error_response(f"Failed to write scan record to DynamoDB: {e}", 500)
 
-    return jsonify(
-        {
-            "key": key,
-            "status": "PENDING",
-            "detail": "File uploaded successfully; scan will start shortly.",
-        }
-    )
+        logger.info("Upload + PENDING record created. file_id=%s", file_id)
 
-
-@app.get("/api/status")
-def get_status():
-    key = request.args.get("key")
-    if not key:
-        return jsonify({"error": "missing_key", "detail": "key query parameter required"}), 400
-
-    try:
-        head = s3.head_object(Bucket=UPLOAD_BUCKET, Key=key)
-    except ClientError:
-        # Object not found yet
         return jsonify(
             {
+                "file_id": file_id,
+                "file_name": original_name,
                 "status": "PENDING",
-                "detail": "File not found in bucket yet; waiting for upload to complete…",
+                "detail": "File uploaded. Waiting for scan to start.",
             }
-        )
+        ), 200
 
-    md = head.get("Metadata", {}) or {}
-    status = md.get("scan_status", "PENDING")
-    detail = md.get("scan_detail") or "Waiting for scan to progress…"
+    except Exception as e:
+        # Catch-all so we NEVER return HTML 500, always JSON
+        logger.exception("Unhandled exception in /api/upload")
+        return error_response(f"Unhandled exception in /api/upload: {e}", 500)
 
-    return jsonify(
-        {
-            "status": status,
-            "detail": detail,
-        }
-    )
+# ------------------------------------------------------------------------------
+# Route: /api/scan-status – returns scan status + events from DynamoDB
+# ------------------------------------------------------------------------------
 
+@app.route("/api/scan-status", methods=["GET"])
+def scan_status():
+    try:
+        file_id = request.args.get("file_id")
+        if not file_id:
+            return error_response("Missing required query parameter 'file_id'.", 400)
+
+        if not SCAN_TABLE:
+            return error_response("SCAN_TABLE env var is not configured on backend service.", 500)
+
+        logger.info("Fetching scan status for file_id=%s", file_id)
+
+        try:
+            table = get_scan_table()
+            resp = table.get_item(Key={"file_id": file_id})
+        except (BotoCoreError, ClientError, RuntimeError) as e:
+            logger.exception("Failed to read scan record from DynamoDB.")
+            return error_response(f"Failed to read scan record from DynamoDB: {e}", 500)
+
+        item = resp.get("Item")
+        if not item:
+            return error_response(f"No record found for file_id={file_id}", 404)
+
+        status = item.get("scan_status", "UNKNOWN")
+        detail = item.get("scan_detail", "No detail provided.")
+        events = item.get("scan_events", [])
+
+        # Normalize events for frontend
+        normalized_events = []
+        for e in events:
+            if isinstance(e, dict):
+                normalized_events.append(
+                    {
+                        "timestamp": e.get("timestamp", ""),
+                        "message": e.get("message", ""),
+                    }
+                )
+            else:
+                normalized_events.append(
+                    {
+                        "timestamp": "",
+                        "message": str(e),
+                    }
+                )
+
+        return jsonify(
+            {
+                "file_id": item.get("file_id", file_id),
+                "file_name": item.get("file_name", ""),
+                "status": status,
+                "detail": detail,
+                "events": normalized_events,
+            }
+        ), 200
+
+    except Exception as e:
+        logger.exception("Unhandled exception in /api/scan-status")
+        return error_response(f"Unhandled exception in /api/scan-status: {e}", 500)
+
+# ------------------------------------------------------------------------------
+# Local dev entrypoint (ECS will use app:app via gunicorn or similar)
+# ------------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
+    # For local testing only
+    app.run(host="0.0.0.0", port=5000, debug=True)
