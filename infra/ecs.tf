@@ -32,10 +32,11 @@ resource "aws_lb" "app" {
 
 # Target groups
 resource "aws_lb_target_group" "frontend_tg" {
-  name     = "${var.app_name}-frontend-tg"
-  port     = 80
-  protocol = "HTTP"
-  vpc_id   = aws_vpc.main.id
+  name        = "${var.app_name}-frontend-tg"
+  port        = 80
+  protocol    = "HTTP"
+  vpc_id      = aws_vpc.main.id
+  target_type = "ip"  # IMPORTANT for Fargate/awsvpc
 
   health_check {
     path = "/"
@@ -47,10 +48,11 @@ resource "aws_lb_target_group" "frontend_tg" {
 }
 
 resource "aws_lb_target_group" "backend_tg" {
-  name     = "${var.app_name}-backend-tg"
-  port     = 8080
-  protocol = "HTTP"
-  vpc_id   = aws_vpc.main.id
+  name        = "${var.app_name}-backend-tg"
+  port        = 8080
+  protocol    = "HTTP"
+  vpc_id      = aws_vpc.main.id
+  target_type = "ip"  # IMPORTANT for Fargate/awsvpc
 
   health_check {
     path = "/api/health"
@@ -213,8 +215,8 @@ resource "aws_ecs_service" "frontend" {
   launch_type     = "FARGATE"
 
   network_configuration {
-    subnets         = [aws_subnet.prisub1.id, aws_subnet.prisub2.id]
-    security_groups = [aws_security_group.ecs_tasks_sg.id]
+    subnets          = [aws_subnet.prisub1.id, aws_subnet.prisub2.id]
+    security_groups  = [aws_security_group.ecs_tasks_sg.id]
     assign_public_ip = false
   }
 
@@ -240,8 +242,8 @@ resource "aws_ecs_service" "backend" {
   launch_type     = "FARGATE"
 
   network_configuration {
-    subnets         = [aws_subnet.prisub1.id, aws_subnet.prisub2.id]
-    security_groups = [aws_security_group.ecs_tasks_sg.id]
+    subnets          = [aws_subnet.prisub1.id, aws_subnet.prisub2.id]
+    security_groups  = [aws_security_group.ecs_tasks_sg.id]
     assign_public_ip = false
   }
 
