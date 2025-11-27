@@ -1,106 +1,1013 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <title>Allen Capstone – Secure File Upload & Scan</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <link rel="stylesheet" href="styles.css" />
-</head>
-<body>
-  <div class="app-shell">
-    <header class="app-header">
-      <div class="app-brand">
-        <div class="brand-icon">AC</div>
+  <head>
+    <meta charset="utf-8" />
+    <title>Capstone – File Scan Dashboard</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      :root {
+        --bg: #050816;
+        --bg-alt: #0b1022;
+        --card: #111827;
+        --accent: #38bdf8;
+        --accent-soft: rgba(56, 189, 248, 0.1);
+        --accent-strong: #0ea5e9;
+        --danger: #f97373;
+        --danger-soft: rgba(248, 113, 113, 0.12);
+        --ok: #4ade80;
+        --ok-soft: rgba(74, 222, 128, 0.12);
+        --text-main: #e5e7eb;
+        --text-soft: #9ca3af;
+        --border-subtle: rgba(148, 163, 184, 0.25);
+        --radius-xl: 18px;
+        --shadow-soft: 0 22px 45px rgba(15, 23, 42, 0.6);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          sans-serif;
+        background: radial-gradient(circle at top, #1d243b 0, #050816 55%);
+        color: var(--text-main);
+        display: flex;
+        justify-content: center;
+        align-items: stretch;
+      }
+
+      .page {
+        width: 100%;
+        max-width: 1120px;
+        padding: 24px 18px 32px;
+        display: flex;
+        flex-direction: column;
+        gap: 18px;
+      }
+
+      header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+      }
+
+      header h1 {
+        margin: 0;
+        font-size: 1.4rem;
+        letter-spacing: 0.03em;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+
+      header h1 span.logo-dot {
+        width: 11px;
+        height: 11px;
+        border-radius: 999px;
+        background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+        box-shadow: 0 0 18px rgba(56, 189, 248, 0.9);
+      }
+
+      header p {
+        margin: 0;
+        font-size: 0.78rem;
+        color: var(--text-soft);
+      }
+
+      .badge {
+        font-size: 0.7rem;
+        padding: 4px 10px;
+        border-radius: 999px;
+        background: linear-gradient(135deg, #1e293b, #020617);
+        border: 1px solid rgba(148, 163, 184, 0.4);
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        color: var(--text-soft);
+      }
+
+      .badge-dot {
+        width: 9px;
+        height: 9px;
+        border-radius: 999px;
+        background: radial-gradient(circle, #4ade80, #22c55e, #166534);
+        box-shadow: 0 0 10px rgba(74, 222, 128, 0.9);
+      }
+
+      .layout {
+        display: grid;
+        grid-template-columns: minmax(0, 1.4fr) minmax(0, 1.1fr);
+        gap: 16px;
+      }
+
+      @media (max-width: 880px) {
+        .layout {
+          grid-template-columns: minmax(0, 1fr);
+        }
+      }
+
+      .card {
+        background: linear-gradient(145deg, #020617, #020617 52%, #020617 100%);
+        border-radius: var(--radius-xl);
+        border: 1px solid rgba(148, 163, 184, 0.35);
+        box-shadow: var(--shadow-soft);
+        padding: 18px 18px 16px;
+        position: relative;
+        overflow: hidden;
+      }
+
+      .card::before {
+        content: "";
+        position: absolute;
+        inset: -40%;
+        background: radial-gradient(
+          circle at top left,
+          rgba(56, 189, 248, 0.12),
+          transparent 60%
+        );
+        opacity: 0.65;
+        pointer-events: none;
+      }
+
+      .card > * {
+        position: relative;
+        z-index: 1;
+      }
+
+      .card-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        margin-bottom: 12px;
+      }
+
+      .card-title {
+        font-size: 0.95rem;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--text-soft);
+      }
+
+      .card-subtitle {
+        font-size: 0.78rem;
+        color: var(--text-soft);
+      }
+
+      /* Upload area */
+
+      .upload-body {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+
+      .upload-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        align-items: center;
+      }
+
+      .file-input {
+        display: none;
+      }
+
+      .btn {
+        border-radius: 999px;
+        border: none;
+        font-size: 0.85rem;
+        padding: 9px 18px;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        font-weight: 500;
+        transition: transform 0.08s ease, box-shadow 0.08s ease,
+          background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+        white-space: nowrap;
+      }
+
+      .btn:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+        transform: none;
+        box-shadow: none;
+      }
+
+      .btn-primary {
+        color: #020617;
+        background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+        box-shadow: 0 14px 28px rgba(56, 189, 248, 0.35);
+      }
+
+      .btn-primary:hover:not(:disabled) {
+        transform: translateY(-1px);
+        box-shadow: 0 18px 36px rgba(56, 189, 248, 0.45);
+      }
+
+      .btn-ghost {
+        background: rgba(15, 23, 42, 0.9);
+        border: 1px solid rgba(148, 163, 184, 0.5);
+        color: var(--text-main);
+      }
+
+      .btn-ghost:hover:not(:disabled) {
+        background: rgba(15, 23, 42, 0.98);
+        border-color: var(--accent);
+        box-shadow: 0 10px 24px rgba(15, 23, 42, 0.75);
+      }
+
+      .btn-sm {
+        font-size: 0.78rem;
+        padding: 6px 12px;
+      }
+
+      .btn-icon {
+        font-size: 1rem;
+        line-height: 0;
+      }
+
+      .file-meta {
+        flex: 1;
+        min-width: 160px;
+        font-size: 0.8rem;
+        color: var(--text-soft);
+        padding: 7px 10px;
+        border-radius: 999px;
+        border: 1px dashed rgba(148, 163, 184, 0.6);
+        background: radial-gradient(
+          circle at left,
+          rgba(56, 189, 248, 0.12),
+          transparent 60%
+        );
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+
+      .file-meta span.label {
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+        font-size: 0.68rem;
+        color: var(--text-soft);
+      }
+
+      .file-meta span.value {
+        color: var(--text-main);
+      }
+
+      .file-meta span.value-empty {
+        color: rgba(148, 163, 184, 0.65);
+        font-style: italic;
+      }
+
+      .helper-text {
+        font-size: 0.75rem;
+        color: var(--text-soft);
+      }
+
+      .helper-text strong {
+        color: var(--accent);
+        font-weight: 500;
+      }
+
+      /* Status card */
+
+      .status-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
+        gap: 10px;
+        align-items: flex-start;
+      }
+
+      @media (max-width: 720px) {
+        .status-grid {
+          grid-template-columns: minmax(0, 1fr);
+        }
+      }
+
+      .status-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 0.78rem;
+        padding: 4px 11px;
+        border-radius: 999px;
+        border: 1px solid var(--border-subtle);
+        background: rgba(15, 23, 42, 0.9);
+        color: var(--text-soft);
+      }
+
+      .status-dot {
+        width: 9px;
+        height: 9px;
+        border-radius: 999px;
+        background: radial-gradient(circle, #e5e7eb, #6b7280);
+      }
+
+      .status-dot.pending {
+        background: radial-gradient(circle, #facc15, #eab308, #854d0e);
+        box-shadow: 0 0 12px rgba(250, 204, 21, 0.8);
+      }
+
+      .status-dot.scanning {
+        background: radial-gradient(circle, #38bdf8, #0ea5e9, #0369a1);
+        box-shadow: 0 0 14px rgba(56, 189, 248, 0.9);
+      }
+
+      .status-dot.clean {
+        background: radial-gradient(circle, #4ade80, #22c55e, #166534);
+        box-shadow: 0 0 14px rgba(74, 222, 128, 0.9);
+      }
+
+      .status-dot.infected {
+        background: radial-gradient(circle, #f97373, #ef4444, #991b1b);
+        box-shadow: 0 0 14px rgba(248, 113, 113, 0.9);
+      }
+
+      .status-main {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        font-size: 0.8rem;
+      }
+
+      .status-label {
+        font-size: 0.7rem;
+        text-transform: uppercase;
+        letter-spacing: 0.16em;
+        color: var(--text-soft);
+      }
+
+      .status-value {
+        font-size: 0.96rem;
+        font-weight: 500;
+      }
+
+      .status-value.clean {
+        color: var(--ok);
+      }
+
+      .status-value.infected {
+        color: var(--danger);
+      }
+
+      .status-detail {
+        font-size: 0.78rem;
+        color: var(--text-soft);
+      }
+
+      .status-meta {
+        font-size: 0.7rem;
+        color: rgba(148, 163, 184, 0.9);
+      }
+
+      .status-meta span {
+        opacity: 0.88;
+      }
+
+      .status-meta span strong {
+        font-weight: 500;
+        color: var(--accent);
+      }
+
+      /* Timeline */
+
+      .timeline {
+        margin: 6px 0 0;
+        padding: 0;
+        list-style: none;
+        max-height: 180px;
+        overflow-y: auto;
+        border-radius: 12px;
+        border: 1px solid rgba(148, 163, 184, 0.28);
+        background: radial-gradient(
+          circle at top,
+          rgba(15, 23, 42, 0.95),
+          #020617
+        );
+      }
+
+      .timeline-item {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        gap: 6px 10px;
+        padding: 7px 10px;
+        border-bottom: 1px solid rgba(31, 41, 55, 0.95);
+        font-size: 0.76rem;
+      }
+
+      .timeline-item:last-child {
+        border-bottom: none;
+      }
+
+      .timeline-time {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+          "Liberation Mono", "Courier New", monospace;
+        font-size: 0.7rem;
+        color: rgba(148, 163, 184, 0.9);
+        padding-top: 1px;
+      }
+
+      .timeline-text {
+        color: rgba(209, 213, 219, 0.96);
+      }
+
+      .timeline-text span.tag {
+        font-size: 0.7rem;
+        text-transform: uppercase;
+        letter-spacing: 0.16em;
+        color: rgba(148, 163, 184, 0.9);
+        margin-right: 6px;
+      }
+
+      .timeline-empty {
+        padding: 10px 11px;
+        font-size: 0.76rem;
+        color: rgba(148, 163, 184, 0.9);
+      }
+
+      /* Alerts */
+
+      .alert {
+        margin-top: 8px;
+        padding: 7px 10px;
+        border-radius: 10px;
+        font-size: 0.78rem;
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+      }
+
+      .alert-icon {
+        font-size: 0.9rem;
+        line-height: 1;
+      }
+
+      .alert-message {
+        flex: 1;
+      }
+
+      .alert-success {
+        background: var(--ok-soft);
+        border: 1px solid rgba(74, 222, 128, 0.7);
+        color: #bbf7d0;
+      }
+
+      .alert-error {
+        background: var(--danger-soft);
+        border: 1px solid rgba(248, 113, 113, 0.7);
+        color: #fecaca;
+      }
+
+      footer {
+        margin-top: 6px;
+        font-size: 0.7rem;
+        color: var(--text-soft);
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+      }
+
+      footer span {
+        opacity: 0.86;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="page">
+      <header>
         <div>
-          <h1>Allen Capstone</h1>
-          <p>Secure File Upload · Malware Scanning · DRaaS on AWS</p>
+          <h1>
+            <span class="logo-dot"></span>
+            Allen Capstone &mdash; File Scan Dashboard
+          </h1>
+          <p>Upload documents, scan with ClamAV, and track the results.</p>
         </div>
-      </div>
-    </header>
+        <div>
+          <span class="badge">
+            <span class="badge-dot"></span>
+            <span>Active DRaaS + Malware Scan</span>
+          </span>
+        </div>
+      </header>
 
-    <main class="app-main">
-      <section class="card card-upload">
-        <h2>Upload a file to scan</h2>
-        <p class="subtitle">
-          Files are stored in S3, scanned by ClamAV in Lambda, and results are
-          logged to DynamoDB.
-        </p>
-
-        <form id="uploadForm" class="upload-form">
-          <label for="fileInput" class="dropzone" id="dropzone">
-            <div class="dropzone-inner">
-              <div class="dropzone-icon">📁</div>
-              <div>
-                <p class="dropzone-title">Click to browse or drag &amp; drop</p>
-                <p class="dropzone-subtitle">Supported: any file type (demo)</p>
+      <main class="layout">
+        <!-- LEFT: Upload + timeline -->
+        <section class="card">
+          <div class="card-header">
+            <div>
+              <div class="card-title">Upload &amp; Scan</div>
+              <div class="card-subtitle">
+                1) Choose a file, 2) Click “Upload &amp; Scan”.
               </div>
             </div>
-            <input id="fileInput" type="file" name="file" hidden />
-          </label>
-
-          <button type="submit" class="btn-primary" id="uploadButton">
-            Upload &amp; Scan
-          </button>
-        </form>
-
-        <p class="hint">
-          For your demo: upload a harmless test file to show a CLEAN result,
-          and use AWS logs to demonstrate detection of the EICAR test string.
-        </p>
-      </section>
-
-      <section class="layout-two-column">
-        <section class="card card-status">
-          <div class="card-header-row">
-            <h2>Current file status</h2>
-            <span class="status-pill status-idle" id="statusPill">IDLE</span>
           </div>
 
-          <dl class="status-details">
-            <div>
-              <dt>File name</dt>
-              <dd id="fileName">—</dd>
-            </div>
-            <div>
-              <dt>File ID</dt>
-              <dd id="fileId">—</dd>
-            </div>
-            <div>
-              <dt>Scan status</dt>
-              <dd id="statusText">Waiting for upload…</dd>
-            </div>
-            <div>
-              <dt>Scan detail</dt>
-              <dd id="detailText">—</dd>
-            </div>
-          </dl>
-        </section>
+          <div class="upload-body">
+            <div class="upload-row">
+              <input
+                id="fileInput"
+                class="file-input"
+                type="file"
+                name="file"
+              />
 
-        <section class="card card-events">
-          <div class="card-header-row">
-            <h2>Scan events</h2>
-            <button class="btn-ghost" id="clearEventsButton" type="button">
-              Clear
-            </button>
-          </div>
+              <button type="button" class="btn btn-ghost" id="chooseFileBtn">
+                <span class="btn-icon">📁</span>
+                <span>Choose file</span>
+              </button>
 
-          <div class="events-log" id="eventsLog">
-            <p class="events-empty">
-              No events yet. Upload a file to see the scan progress here.
+              <div class="file-meta">
+                <span class="label">Selected</span>
+                <span id="fileNameDisplay" class="value-empty"
+                  >No file chosen</span
+                >
+              </div>
+            </div>
+
+            <div class="upload-row">
+              <button
+                type="button"
+                class="btn btn-primary"
+                id="uploadBtn"
+                disabled
+              >
+                <span class="btn-icon">🛡️</span>
+                <span>Upload &amp; Scan</span>
+              </button>
+
+              <button
+                type="button"
+                class="btn btn-sm btn-ghost"
+                id="clearBtn"
+              >
+                Clear
+              </button>
+            </div>
+
+            <p class="helper-text">
+              <strong>Tip:</strong> Use a small test file first to confirm the
+              upload and scan flow. Supported types depend on the backend rules.
             </p>
+
+            <div id="uploadAlertContainer"></div>
+
+            <div style="margin-top: 6px">
+              <div class="card-subtitle" style="margin-bottom: 4px">
+                Scan timeline
+              </div>
+              <ul class="timeline" id="timeline">
+                <li class="timeline-empty">
+                  No events yet. Upload a file to see the scan steps here.
+                </li>
+              </ul>
+            </div>
           </div>
         </section>
-      </section>
-    </main>
 
-    <footer class="app-footer">
-      <p>
-        Deployed on AWS ECS Fargate · S3 · Lambda (ClamAV) · DynamoDB ·
-        CI/CD via GitHub Actions &amp; ECR
-      </p>
-    </footer>
-  </div>
+        <!-- RIGHT: Current status -->
+        <section class="card">
+          <div class="card-header">
+            <div>
+              <div class="card-title">Scan Status</div>
+              <div class="card-subtitle">Latest file being scanned.</div>
+            </div>
+          </div>
 
-  <script src="app.js" defer></script>
-</body>
+          <div class="status-grid">
+            <div class="status-main">
+              <div class="status-label">State</div>
+              <div class="status-pill">
+                <span
+                  class="status-dot"
+                  id="statusDot"
+                  title="Current scan state"
+                ></span>
+                <span id="statusText">Idle &mdash; waiting for first upload</span>
+              </div>
+
+              <div class="status-detail" id="statusDetail">
+                Once you upload a file, we’ll show PENDING → SCANNING → CLEAN or
+                INFECTED here.
+              </div>
+            </div>
+
+            <div class="status-main">
+              <div class="status-label">File</div>
+              <div class="status-value" id="currentFileName">
+                &mdash; no file yet &mdash;
+              </div>
+              <div class="status-meta" id="statusMeta">
+                <span
+                  >Last updated:
+                  <strong id="lastUpdated">never</strong></span
+                >
+                <br />
+                <span
+                  >Threat:
+                  <strong id="threatInfo">n/a</strong></span
+                >
+              </div>
+            </div>
+          </div>
+
+          <div id="statusAlertContainer"></div>
+        </section>
+      </main>
+
+      <footer>
+        <span
+          >Frontend served via ECS Fargate • Backend via Flask API • ClamAV
+          Lambda scanner</span
+        >
+        <span>Environment: <strong>ca-central-1</strong></span>
+      </footer>
+    </div>
+
+    <script>
+      // === CONFIG ===
+      // If your backend is behind the same ALB with path-based routing,
+      // /api/* will go to the backend service. Adjust if needed.
+      const API_BASE = "/api";
+
+      const fileInput = document.getElementById("fileInput");
+      const chooseFileBtn = document.getElementById("chooseFileBtn");
+      const uploadBtn = document.getElementById("uploadBtn");
+      const clearBtn = document.getElementById("clearBtn");
+      const fileNameDisplay = document.getElementById("fileNameDisplay");
+
+      const timelineEl = document.getElementById("timeline");
+
+      const uploadAlertContainer = document.getElementById(
+        "uploadAlertContainer"
+      );
+      const statusAlertContainer = document.getElementById(
+        "statusAlertContainer"
+      );
+
+      const statusDot = document.getElementById("statusDot");
+      const statusText = document.getElementById("statusText");
+      const statusDetail = document.getElementById("statusDetail");
+      const currentFileNameEl = document.getElementById("currentFileName");
+      const lastUpdatedEl = document.getElementById("lastUpdated");
+      const threatInfoEl = document.getElementById("threatInfo");
+
+      let currentFileId = null;
+      let currentPollTimer = null;
+
+      function setStatusState(state, options = {}) {
+        statusDot.className = "status-dot";
+        let label = "Idle";
+        let detail =
+          "Upload a file to start a scan. Status will appear here.";
+        let threat = "n/a";
+
+        if (state === "idle") {
+          // nothing extra
+        } else if (state === "pending") {
+          statusDot.classList.add("pending");
+          label = "Pending";
+          detail = "File has been accepted; waiting for scan to start.";
+        } else if (state === "scanning") {
+          statusDot.classList.add("scanning");
+          label = "Scanning…";
+          detail = "ClamAV is analyzing your file for threats.";
+        } else if (state === "clean") {
+          statusDot.classList.add("clean");
+          label = "Clean";
+          detail = "No known threats were detected in this file.";
+          if (options.virus) {
+            detail += " (Additional info: " + options.virus + ")";
+          }
+          threat = "none detected";
+        } else if (state === "infected") {
+          statusDot.classList.add("infected");
+          label = "Infected";
+          detail =
+            "Threats were detected in this file. Do NOT distribute or open it.";
+          if (options.virus) {
+            threat = options.virus;
+          } else {
+            threat = "malware detected";
+          }
+        } else if (state === "error") {
+          label = "Error";
+          detail =
+            options.message ||
+            "An error occurred while checking the status. Please try again.";
+          threat = "n/a";
+        }
+
+        statusText.innerHTML = label;
+        statusDetail.textContent = detail;
+        if (options.fileName) {
+          currentFileNameEl.textContent = options.fileName;
+        }
+        if (options.threat) {
+          threat = options.threat;
+        }
+        threatInfoEl.textContent = threat;
+        lastUpdatedEl.textContent = new Date().toLocaleTimeString();
+      }
+
+      function resetTimeline() {
+        timelineEl.innerHTML =
+          '<li class="timeline-empty">No events yet. Upload a file to see the scan steps here.</li>';
+      }
+
+      function addTimelineEvent(label, text) {
+        const now = new Date();
+        const timeStr = now.toLocaleTimeString();
+        if (timelineEl.querySelector(".timeline-empty")) {
+          timelineEl.innerHTML = "";
+        }
+        const li = document.createElement("li");
+        li.className = "timeline-item";
+        li.innerHTML = `
+          <div class="timeline-time">${timeStr}</div>
+          <div class="timeline-text">
+            <span class="tag">${label}</span>${text}
+          </div>
+        `;
+        timelineEl.appendChild(li);
+        timelineEl.scrollTop = timelineEl.scrollHeight;
+      }
+
+      function showAlert(container, type, message) {
+        container.innerHTML = "";
+        const div = document.createElement("div");
+        div.className =
+          "alert " + (type === "error" ? "alert-error" : "alert-success");
+        const icon = type === "error" ? "⚠️" : "✅";
+        div.innerHTML = `
+          <div class="alert-icon">${icon}</div>
+          <div class="alert-message">${message}</div>
+        `;
+        container.appendChild(div);
+      }
+
+      function clearAlerts() {
+        uploadAlertContainer.innerHTML = "";
+        statusAlertContainer.innerHTML = "";
+      }
+
+      function clearPoll() {
+        if (currentPollTimer) {
+          clearTimeout(currentPollTimer);
+          currentPollTimer = null;
+        }
+      }
+
+      chooseFileBtn.addEventListener("click", () => {
+        fileInput.click();
+      });
+
+      clearBtn.addEventListener("click", () => {
+        fileInput.value = "";
+        fileNameDisplay.classList.remove("value");
+        fileNameDisplay.classList.add("value-empty");
+        fileNameDisplay.textContent = "No file chosen";
+        uploadBtn.disabled = true;
+        clearAlerts();
+        resetTimeline();
+        currentFileId = null;
+        clearPoll();
+        setStatusState("idle", { fileName: "— no file yet —" });
+      });
+
+      fileInput.addEventListener("change", () => {
+        clearAlerts();
+        const file = fileInput.files[0];
+        if (file) {
+          const sizeKb = Math.round(file.size / 1024);
+          fileNameDisplay.classList.remove("value-empty");
+          fileNameDisplay.classList.add("value");
+          fileNameDisplay.textContent = `${file.name} (${sizeKb} KB)`;
+          uploadBtn.disabled = false;
+          setStatusState("idle", { fileName: file.name });
+        } else {
+          fileNameDisplay.classList.remove("value");
+          fileNameDisplay.classList.add("value-empty");
+          fileNameDisplay.textContent = "No file chosen";
+          uploadBtn.disabled = true;
+        }
+      });
+
+      uploadBtn.addEventListener("click", async () => {
+        clearAlerts();
+        const file = fileInput.files[0];
+        if (!file) {
+          showAlert(uploadAlertContainer, "error", "Please choose a file first.");
+          return;
+        }
+
+        uploadBtn.disabled = true;
+        chooseFileBtn.disabled = true;
+        clearPoll();
+        resetTimeline();
+
+        addTimelineEvent("CLIENT", `Uploading file "${file.name}" to backend…`);
+        setStatusState("pending", { fileName: file.name });
+
+        try {
+          const formData = new FormData();
+          formData.append("file", file);
+
+          const res = await fetch(`${API_BASE}/upload`, {
+            method: "POST",
+            body: formData,
+          });
+
+          if (!res.ok) {
+            const text = await res.text().catch(() => "");
+            addTimelineEvent(
+              "ERROR",
+              `Upload failed (status ${res.status}).`
+            );
+            showAlert(
+              uploadAlertContainer,
+              "error",
+              `Upload failed with status ${res.status}${
+                text ? ": " + text : ""
+              }`
+            );
+            setStatusState("error", {
+              fileName: file.name,
+              message: "Upload failed. See error above.",
+            });
+            return;
+          }
+
+          const data = await res.json().catch(() => ({}));
+          currentFileId = data.file_id || data.id || null;
+
+          addTimelineEvent(
+            "SERVER",
+            "File accepted by backend. Scan will start shortly."
+          );
+          showAlert(
+            uploadAlertContainer,
+            "success",
+            "File uploaded successfully. Waiting for scan to complete…"
+          );
+          setStatusState("pending", { fileName: file.name });
+
+          if (!currentFileId) {
+            // If backend does not yet return an ID, we just stop here.
+            addTimelineEvent(
+              "INFO",
+              "Backend did not return a file_id. Live polling is not available."
+            );
+            uploadBtn.disabled = false;
+            chooseFileBtn.disabled = false;
+            return;
+          }
+
+          addTimelineEvent(
+            "CLIENT",
+            `Tracking scan status for file ID: ${currentFileId}`
+          );
+          pollScanStatus(currentFileId, file.name);
+        } catch (err) {
+          console.error(err);
+          addTimelineEvent("ERROR", "Unexpected error during upload.");
+          showAlert(
+            uploadAlertContainer,
+            "error",
+            "Unexpected error while uploading. Check console / CloudWatch logs."
+          );
+          setStatusState("error", {
+            fileName: file.name,
+            message: "Unexpected error while uploading.",
+          });
+        } finally {
+          uploadBtn.disabled = false;
+          chooseFileBtn.disabled = false;
+        }
+      });
+
+      async function pollScanStatus(fileId, fileName, attempt = 0) {
+        clearPoll();
+
+        try {
+          const res = await fetch(
+            `${API_BASE}/scan-status?file_id=${encodeURIComponent(fileId)}`,
+            { method: "GET" }
+          );
+
+          if (!res.ok) {
+            addTimelineEvent(
+              "ERROR",
+              `Status check failed (status ${res.status}).`
+            );
+            if (attempt < 3) {
+              currentPollTimer = setTimeout(
+                () => pollScanStatus(fileId, fileName, attempt + 1),
+                3000
+              );
+            } else {
+              setStatusState("error", {
+                fileName,
+                message: "Unable to retrieve scan status from backend.",
+              });
+              showAlert(
+                statusAlertContainer,
+                "error",
+                "Unable to retrieve scan status from backend after several attempts."
+              );
+            }
+            return;
+          }
+
+          const data = await res.json().catch(() => ({}));
+
+          const status = (data.status || "").toUpperCase();
+          const virus = data.virus || data.threat || null;
+
+          if (status === "PENDING") {
+            addTimelineEvent(
+              "STATUS",
+              "Scan is queued (PENDING). Waiting for Lambda to pick up the file."
+            );
+            setStatusState("pending", { fileName });
+            currentPollTimer = setTimeout(
+              () => pollScanStatus(fileId, fileName, attempt + 1),
+              3000
+            );
+          } else if (status === "SCANNING") {
+            addTimelineEvent("STATUS", "Lambda is actively scanning the file.");
+            setStatusState("scanning", { fileName });
+            currentPollTimer = setTimeout(
+              () => pollScanStatus(fileId, fileName, attempt + 1),
+              3000
+            );
+          } else if (status === "CLEAN") {
+            addTimelineEvent("DONE", "File marked CLEAN by ClamAV.");
+            setStatusState("clean", { fileName, virus });
+            showAlert(
+              statusAlertContainer,
+              "success",
+              "Scan complete: no known threats detected."
+            );
+          } else if (status === "INFECTED") {
+            addTimelineEvent(
+              "DONE",
+              `File is INFECTED. Detected threat: ${virus || "unknown"}`
+            );
+            setStatusState("infected", { fileName, virus });
+            showAlert(
+              statusAlertContainer,
+              "error",
+              `Scan complete: malware detected (${virus || "unknown signature"}).`
+            );
+          } else {
+            addTimelineEvent(
+              "INFO",
+              "Backend returned an unknown status. Treating as error."
+            );
+            setStatusState("error", {
+              fileName,
+              message: "Backend returned unknown status for scan.",
+            });
+            showAlert(
+              statusAlertContainer,
+              "error",
+              "Unexpected status received from backend."
+            );
+          }
+        } catch (err) {
+          console.error(err);
+          addTimelineEvent(
+            "ERROR",
+            "Exception while polling scan status. See console logs."
+          );
+          if (attempt < 3) {
+            currentPollTimer = setTimeout(
+              () => pollScanStatus(fileId, fileName, attempt + 1),
+              3000
+            );
+          } else {
+            setStatusState("error", {
+              fileName,
+              message: "Error talking to backend for scan status.",
+            });
+            showAlert(
+              statusAlertContainer,
+              "error",
+              "Error communicating with backend for scan status."
+            );
+          }
+        }
+      }
+
+      // Initialize
+      setStatusState("idle", { fileName: "— no file yet —" });
+      resetTimeline();
+    </script>
+  </body>
 </html>
