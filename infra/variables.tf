@@ -1,13 +1,19 @@
 variable "region" {
-  description = "AWS region for all resources"
+  description = "Primary AWS region for all resources"
   type        = string
   default     = "ca-central-1"
+}
+
+variable "dr_region" {
+  description = "Secondary DR region used for cross-region replication"
+  type        = string
+  default     = "us-east-1"
 }
 
 variable "app_name" {
   description = "Prefix for resource names"
   type        = string
-  default     = "allen-capstone"
+  default     = "group6-capstone"
 }
 
 variable "frontend_image" {

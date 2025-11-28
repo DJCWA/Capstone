@@ -1,12 +1,12 @@
-########################################
-# DynamoDB table for file scan results
-########################################
+################################
+# DynamoDB table for scan results
+################################
 
 resource "aws_dynamodb_table" "scan_results" {
-  name = "allen-capstone-scan-results"
-
+  name         = "${var.app_name}-scan-results"
   billing_mode = "PAY_PER_REQUEST"
 
+  # Primary key: file_id + scan_timestamp
   hash_key  = "file_id"
   range_key = "scan_timestamp"
 
@@ -20,16 +20,18 @@ resource "aws_dynamodb_table" "scan_results" {
     type = "S"
   }
 
-  tags = {
-    Project     = "allen-capstone"
-    Environment = "dev"
+  # Point-in-time recovery = regional DR (restore to any second in last 35 days)
+  point_in_time_recovery {
+    enabled = true
   }
-}
 
-output "scan_results_table_name" {
-  value = aws_dynamodb_table.scan_results.name
-}
+  # Global Table replica in the DR region for multi-region DR
+  replica {
+    region_name = var.dr_region
+  }
 
-output "scan_results_table_arn" {
-  value = aws_dynamodb_table.scan_results.arn
+  tags = {
+    Name        = "${var.app_name}-scan-results"
+    Environment = "prod"
+  }
 }
