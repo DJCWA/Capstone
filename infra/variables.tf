@@ -5,15 +5,15 @@ variable "region" {
 }
 
 variable "dr_region" {
-  description = "Secondary DR region used for cross-region replication"
+  description = "DR AWS region used for cross-region replication"
   type        = string
   default     = "us-east-1"
 }
 
 variable "app_name" {
-  description = "Prefix for resource names"
+  description = "Prefix for resource names (must be globally unique for S3 buckets)"
   type        = string
-  default     = "group6-capstone"
+  default     = "allen-capstone-group6"
 }
 
 variable "frontend_image" {
@@ -23,5 +23,10 @@ variable "frontend_image" {
 
 variable "backend_image" {
   description = "ECR image URI for the backend container"
+  type        = string
+}
+
+variable "clamav_layer_arn" {
+  description = "ARN of the pre-built ClamAV Lambda layer"
   type        = string
 }
