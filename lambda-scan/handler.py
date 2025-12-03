@@ -1,174 +1,258 @@
+import os
 import json
 import logging
-import os
 import subprocess
-import tempfile
+from datetime import datetime, timezone
 from urllib.parse import unquote_plus
 
 import boto3
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, BotoCoreError
 
-# Configure logging
+# ------------------------------------------------------------------------------
+# Logging setup
+# ------------------------------------------------------------------------------
+
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-# AWS clients
+# ------------------------------------------------------------------------------
+# AWS clients and env
+# ------------------------------------------------------------------------------
+
 s3 = boto3.client("s3")
+dynamodb = boto3.resource("dynamodb")
 
-# Paths provided by the ClamAV Lambda layer
-CLAMSCAN_PATH = "/opt/bin/clamscan"
-CLAM_DB_PATH = "/opt/share/clamav"  # matches how the layer was built
+SCAN_TABLE_NAME = os.environ.get("SCAN_TABLE")
+if not SCAN_TABLE_NAME:
+    logger.error("SCAN_TABLE environment variable is not set. Lambda will not be able to write scan results.")
 
-# Destination bucket for CLEAN files
-SAFE_BUCKET = os.environ.get("SAFE_BUCKET")
+try:
+    SCAN_TABLE = dynamodb.Table(SCAN_TABLE_NAME) if SCAN_TABLE_NAME else None
+except Exception as e:
+    logger.exception("Failed to bind DynamoDB table: %s", e)
+    SCAN_TABLE = None
+
+# ClamAV in the layer
+CLAMAV_BIN = "/opt/bin/clamscan"
+CLAMAV_DB_DIR = os.environ.get("CLAMAV_DB_DIR", "/opt/share/clamav")
+
+# ------------------------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------------------------
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds") + "Z"
 
 
-def run_clam_scan(file_path: str) -> str:
+def extract_ids_from_key(key: str):
     """
-    Run ClamAV scan on the given file and return one of:
-      - "CLEAN"
-      - "INFECTED"
-      - "ERROR"
+    Expect keys like: uploads/{file_id}/{file_name}
+    Example: uploads/87299813-1033-452e-a875-97fbb8cbbd49/test.txt
     """
+    parts = key.split("/")
+    file_name = parts[-1] if parts else key
+    file_id = file_name
+
+    if len(parts) >= 3:
+        # "uploads", "{file_id}", "{file_name}"
+        file_id = parts[1]
+
+    return file_id, file_name
+
+
+def run_clamav_scan(local_path: str):
+    """
+    Run ClamAV against the downloaded file and interpret result:
+      - returncode 0 => CLEAN
+      - returncode 1 => INFECTED
+      - anything else => ERROR
+    """
+    start_ts = now_iso()
     cmd = [
-        CLAMSCAN_PATH,
-        "--database",
-        CLAM_DB_PATH,
-        "--no-summary",
+        CLAMAV_BIN,
         "--stdout",
-        file_path,
+        "--infected",
+        "-d",
+        CLAMAV_DB_DIR,
+        local_path,
     ]
 
     logger.info("Running ClamAV: %s", " ".join(cmd))
+
     try:
-        result = subprocess.run(
+        proc = subprocess.run(
             cmd,
             capture_output=True,
-            text=True,
-            check=False,  # we handle non-zero exit codes ourselves
+            text=True
         )
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Failed to execute clamscan: %s", exc)
-        return "ERROR"
+    except Exception as e:
+        msg = f"Failed to execute clamscan: {e}"
+        logger.exception(msg)
+        return "ERROR", msg, [
+            {"timestamp": start_ts, "message": msg}
+        ]
 
-    if result.stdout:
-        logger.info("clamscan stdout: %s", result.stdout.strip())
-    if result.stderr:
-        logger.warning("clamscan stderr: %s", result.stderr.strip())
+    stdout = proc.stdout or ""
+    stderr = proc.stderr or ""
 
-    # Exit code semantics:
-    #   0 -> no virus found
-    #   1 -> virus(es) found
-    #  >1 -> error
-    if result.returncode == 0:
-        return "CLEAN"
-    if result.returncode == 1:
-        return "INFECTED"
+    logger.info("ClamAV exit=%s", proc.returncode)
+    if stdout:
+        logger.info("ClamAV stdout: %s", stdout)
+    if stderr:
+        logger.info("ClamAV stderr: %s", stderr)
 
-    logger.error("clamscan exited with unexpected code %s", result.returncode)
-    return "ERROR"
+    events = [
+        {"timestamp": start_ts, "message": "ClamAV scan started."}
+    ]
+    if stdout.strip():
+        events.append(
+            {
+                "timestamp": now_iso(),
+                "message": f"ClamAV output:\n{stdout[:3900]}",  # avoid huge payload
+            }
+        )
+    if stderr.strip():
+        events.append(
+            {
+                "timestamp": now_iso(),
+                "message": f"ClamAV stderr:\n{stderr[:3900]}",
+            }
+        )
 
+    if proc.returncode == 0:
+        status = "CLEAN"
+        detail = "File is clean (no threats detected by ClamAV)."
+    elif proc.returncode == 1:
+        status = "INFECTED"
+        detail = "ClamAV detected one or more threats in the file."
+    else:
+        status = "ERROR"
+        detail = f"ClamAV scan failed with return code {proc.returncode}."
+
+    return status, detail, events
+
+
+def write_scan_record(
+    file_id: str,
+    file_name: str,
+    bucket: str,
+    key: str,
+    status: str,
+    detail: str,
+    extra_events=None,
+):
+    """
+    Write a *new* record to the DynamoDB scan table.
+    Backend will always read the latest scan_timestamp for a given file_id.
+    """
+    if SCAN_TABLE is None:
+        logger.error("SCAN_TABLE not initialized, cannot write scan result.")
+        return
+
+    if extra_events is None:
+        extra_events = []
+
+    ts = now_iso()
+    item = {
+        "file_id": file_id,
+        "scan_timestamp": ts,  # 🔴 REQUIRED sort key
+        "file_name": file_name,
+        "s3_bucket": bucket,
+        "s3_key": key,
+        "scan_status": status,
+        "scan_detail": detail,
+        "scan_events": extra_events,
+        "created_at": ts,
+        "updated_at": ts,
+    }
+
+    try:
+        SCAN_TABLE.put_item(Item=item)
+        logger.info("Wrote scan record to DynamoDB: %s", item)
+    except (ClientError, BotoCoreError, Exception) as e:
+        logger.exception("Failed to write scan record to DynamoDB: %s", e)
+
+
+# ------------------------------------------------------------------------------
+# Main Lambda handler
+# ------------------------------------------------------------------------------
 
 def lambda_handler(event, context):
-    """
-    Triggered by S3 ObjectCreated events on the RAW uploads bucket.
-
-    For each object:
-      1. Download object to /tmp
-      2. Scan with ClamAV
-      3. Stamp scan_status metadata back on the RAW object
-      4. If CLEAN and SAFE_BUCKET is configured, copy to SAFE bucket
-    """
     logger.info("Received event: %s", json.dumps(event))
 
-    records = event.get("Records", [])
-    if not records:
-        logger.warning("No Records in event")
-        return {"statusCode": 400, "body": "No records to process"}
+    results = []
 
-    for record in records:
-        bucket = record["s3"]["bucket"]["name"]
-        key = unquote_plus(record["s3"]["object"]["key"])
-        logger.info("Processing s3://%s/%s", bucket, key)
+    for record in event.get("Records", []):
+        try:
+            bucket = record["s3"]["bucket"]["name"]
+            key = unquote_plus(record["s3"]["object"]["key"])
 
-        # 1. Download to a temp file
-        with tempfile.NamedTemporaryFile() as tmp:
-            tmp_path = tmp.name
+            file_id, file_name = extract_ids_from_key(key)
+            local_path = f"/tmp/{file_name}"
+
+            logger.info("Processing s3://%s/%s (file_id=%s)", bucket, key, file_id)
+
+            # 1) Download the file from S3
             try:
-                logger.info("Downloading object to %s", tmp_path)
-                s3.download_file(bucket, key, tmp_path)
-            except ClientError as err:
-                logger.exception(
-                    "Failed to download s3://%s/%s: %s", bucket, key, err
+                s3.download_file(bucket, key, local_path)
+                logger.info("Downloaded to %s", local_path)
+            except (ClientError, BotoCoreError) as e:
+                msg = f"Failed to download s3://{bucket}/{key}: {e}"
+                logger.exception(msg)
+                write_scan_record(
+                    file_id,
+                    file_name,
+                    bucket,
+                    key,
+                    "ERROR",
+                    msg,
+                    [{"timestamp": now_iso(), "message": msg}],
+                )
+                results.append(
+                    {
+                        "file_id": file_id,
+                        "status": "ERROR",
+                        "message": msg,
+                    }
                 )
                 continue
 
-            # 2. Run ClamAV scan
-            status = run_clam_scan(tmp_path)
-            logger.info("Scan result for s3://%s/%s -> %s", bucket, key, status)
+            # 2) Run ClamAV scan
+            status, detail, events = run_clamav_scan(local_path)
 
-        # 3. Read existing metadata and stamp scan_status back on RAW object
-        try:
-            head = s3.head_object(Bucket=bucket, Key=key)
-            metadata = head.get("Metadata", {}) or {}
-        except ClientError as err:
-            logger.warning(
-                "Could not read metadata for s3://%s/%s: %s", bucket, key, err
-            )
-            metadata = {}
-
-        metadata["scan_status"] = status
-
-        try:
-            logger.info("Updating RAW object metadata with scan_status=%s", status)
-            s3.copy_object(
-                Bucket=bucket,
-                Key=key,
-                CopySource={"Bucket": bucket, "Key": key},
-                Metadata=metadata,
-                MetadataDirective="REPLACE",
-            )
-        except ClientError as err:
-            logger.warning(
-                "Failed to update RAW object metadata for s3://%s/%s: %s",
-                bucket,
-                key,
-                err,
+            # 3) Write scan result to DynamoDB
+            write_scan_record(
+                file_id=file_id,
+                file_name=file_name,
+                bucket=bucket,
+                key=key,
+                status=status,
+                detail=detail,
+                extra_events=events,
             )
 
-        # 4. If CLEAN, copy to SAFE bucket (this is your "duplicate if successful")
-        if status == "CLEAN":
-            if not SAFE_BUCKET:
-                logger.warning(
-                    "SAFE_BUCKET env var is not set; CLEAN object will not be promoted"
-                )
-            else:
-                try:
-                    logger.info(
-                        "Copying CLEAN object to safe bucket s3://%s/%s",
-                        SAFE_BUCKET,
-                        key,
-                    )
-                    s3.copy_object(
-                        Bucket=SAFE_BUCKET,
-                        Key=key,
-                        CopySource={"Bucket": bucket, "Key": key},
-                        Metadata=metadata,
-                        MetadataDirective="REPLACE",
-                    )
-                except ClientError as err:
-                    logger.exception(
-                        "Failed to copy CLEAN object to safe bucket s3://%s/%s: %s",
-                        SAFE_BUCKET,
-                        key,
-                        err,
-                    )
-        else:
-            logger.warning(
-                "Object s3://%s/%s is %s; not copying to SAFE bucket",
-                bucket,
-                key,
-                status,
+            results.append(
+                {
+                    "file_id": file_id,
+                    "status": status,
+                    "detail": detail,
+                }
             )
 
-    return {"statusCode": 200, "body": "Scan complete"}
+        except Exception as e:
+            logger.exception("Unhandled exception while processing record: %s", e)
+            results.append(
+                {
+                    "status": "ERROR",
+                    "detail": f"Unhandled exception: {e}",
+                }
+            )
+        finally:
+            # Try to remove local file if it exists
+            try:
+                if os.path.exists(local_path):
+                    os.remove(local_path)
+            except Exception:
+                pass
+
+    return {"results": results}
