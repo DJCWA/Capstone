@@ -31,7 +31,7 @@ jobs:
       # Backend image
       - name: Build & push backend image
         run: |
-          BACKEND_REPO=${{ steps.login-ecr.outputs.registry }}/${APP_NAME}-backend
+          BACKEND_REPO=${{ steps.login-ecr.outputs.registry }}/allen-capstone-backend
           echo "Building backend: $BACKEND_REPO:latest"
           docker build -t $BACKEND_REPO:latest ./backend
           docker push $BACKEND_REPO:latest
@@ -39,7 +39,7 @@ jobs:
       # Frontend image
       - name: Build & push frontend image
         run: |
-          FRONTEND_REPO=${{ steps.login-ecr.outputs.registry }}/${APP_NAME}-frontend
+          FRONTEND_REPO=${{ steps.login-ecr.outputs.registry }}/allen-capstone-frontend
           echo "Building frontend: $FRONTEND_REPO:latest"
           docker build -t $FRONTEND_REPO:latest ./frontend
           docker push $FRONTEND_REPO:latest
