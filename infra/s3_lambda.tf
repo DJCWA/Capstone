@@ -1,71 +1,43 @@
 ########################
-# S3 buckets for uploads (RAW + CLEAN)
+# S3 bucket for uploads
 ########################
 
-resource "aws_s3_bucket" "uploads_raw" {
-  bucket        = "${var.app_name}-uploads-raw"
+resource "aws_s3_bucket" "uploads" {
+  bucket = "${var.app_name}-uploads"
+
   force_destroy = true
 
   tags = {
-    Name        = "${var.app_name}-uploads-raw"
+    Name        = "${var.app_name}-uploads"
     Environment = "prod"
-    Purpose     = "raw-uploads"
+    Component   = "uploads"
   }
 }
 
-resource "aws_s3_bucket_versioning" "uploads_raw_versioning" {
-  bucket = aws_s3_bucket.uploads_raw.id
+# Versioning is required for cross-region replication and DR
+resource "aws_s3_bucket_versioning" "uploads_versioning" {
+  bucket = aws_s3_bucket.uploads.id
 
   versioning_configuration {
     status = "Enabled"
   }
 }
 
-resource "aws_s3_bucket" "uploads_clean" {
-  bucket        = "${var.app_name}-uploads-clean"
-  force_destroy = true
+# Lock bucket down (no public access)
+resource "aws_s3_bucket_public_access_block" "uploads_pab" {
+  bucket = aws_s3_bucket.uploads.id
 
-  tags = {
-    Name        = "${var.app_name}-uploads-clean"
-    Environment = "prod"
-    Purpose     = "clean-uploads"
-  }
-}
-
-resource "aws_s3_bucket_versioning" "uploads_clean_versioning" {
-  bucket = aws_s3_bucket.uploads_clean.id
-
-  versioning_configuration {
-    status = "Enabled"
-  }
-}
-
-# Default encryption for both buckets
-resource "aws_s3_bucket_server_side_encryption_configuration" "uploads_raw_sse" {
-  bucket = aws_s3_bucket.uploads_raw.id
-
-  rule {
-    apply_server_side_encryption_by_default {
-      sse_algorithm = "AES256"
-    }
-  }
-}
-
-resource "aws_s3_bucket_server_side_encryption_configuration" "uploads_clean_sse" {
-  bucket = aws_s3_bucket.uploads_clean.id
-
-  rule {
-    apply_server_side_encryption_by_default {
-      sse_algorithm = "AES256"
-    }
-  }
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
 }
 
 ########################
-# Lambda IAM role + policy
+# IAM Role for Lambda
 ########################
 
-data "aws_iam_policy_document" "lambda_assume_role" {
+data "aws_iam_policy_document" "lambda_assume" {
   statement {
     actions = ["sts:AssumeRole"]
 
@@ -76,86 +48,108 @@ data "aws_iam_policy_document" "lambda_assume_role" {
   }
 }
 
-resource "aws_iam_role" "scan_lambda_role" {
-  name               = "${var.app_name}-scan-lambda-role"
-  assume_role_policy = data.aws_iam_policy_document.lambda_assume_role.json
+resource "aws_iam_role" "lambda_scan_role" {
+  name               = "${var.app_name}-lambda-scan-role"
+  assume_role_policy = data.aws_iam_policy_document.lambda_assume.json
 }
 
-resource "aws_iam_role_policy_attachment" "scan_lambda_basic" {
-  role       = aws_iam_role.scan_lambda_role.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
-}
-
-data "aws_iam_policy_document" "scan_lambda_policy_doc" {
+# Policy: Lambda can read/write from the uploads bucket and write logs
+data "aws_iam_policy_document" "lambda_scan_policy" {
   statement {
-    sid    = "S3Access"
+    effect = "Allow"
+
+    actions = [
+      "logs:CreateLogGroup",
+      "logs:CreateLogStream",
+      "logs:PutLogEvents"
+    ]
+
+    resources = ["*"]
+  }
+
+  statement {
     effect = "Allow"
 
     actions = [
       "s3:GetObject",
-      "s3:GetObjectTagging",
       "s3:GetObjectVersion",
       "s3:PutObject",
-      "s3:PutObjectTagging",
-      "s3:DeleteObject"
+      "s3:PutObjectAcl",
+      "s3:ListBucket"
     ]
 
     resources = [
-      "${aws_s3_bucket.uploads_raw.arn}/*",
-      "${aws_s3_bucket.uploads_clean.arn}/*"
+      aws_s3_bucket.uploads.arn,
+      "${aws_s3_bucket.uploads.arn}/*"
     ]
   }
 }
 
-resource "aws_iam_role_policy" "scan_lambda_policy" {
-  name   = "${var.app_name}-scan-lambda-policy"
-  role   = aws_iam_role.scan_lambda_role.id
-  policy = data.aws_iam_policy_document.scan_lambda_policy_doc.json
+resource "aws_iam_role_policy" "lambda_scan_inline" {
+  name   = "${var.app_name}-lambda-scan-policy"
+  role   = aws_iam_role.lambda_scan_role.id
+  policy = data.aws_iam_policy_document.lambda_scan_policy.json
 }
 
 ########################
-# Lambda function that scans RAW bucket and promotes to CLEAN bucket
+# Package Lambda code
+########################
+
+# Zips the ../lambda-scan folder into ../lambda-scan.zip
+data "archive_file" "lambda_scan_zip" {
+  type        = "zip"
+  source_dir  = "${path.module}/../lambda-scan"
+  output_path = "${path.module}/../lambda-scan.zip"
+}
+
+########################
+# Lambda function
 ########################
 
 resource "aws_lambda_function" "scan" {
-  function_name = "${var.app_name}-clamav-scan"
-  role          = aws_iam_role.scan_lambda_role.arn
-  handler       = "handler.lambda_handler"
-  runtime       = "python3.12"
+  function_name = "${var.app_name}-scan"
+  role          = aws_iam_role.lambda_scan_role.arn
 
-  filename         = "${path.module}/lambda-scan.zip"
-  source_code_hash = filebase64sha256("${path.module}/lambda-scan.zip")
+  filename         = data.archive_file.lambda_scan_zip.output_path
+  source_code_hash = data.archive_file.lambda_scan_zip.output_base64sha256
 
-  timeout     = 300
-  memory_size = 10240
+  handler = "handler.lambda_handler"
+  runtime = "python3.12"
+  timeout = 120
+  memory_size = 1024
 
-  layers = [var.clamav_layer_arn]
+  # Use the ClamAV layer ARN you passed via variable
+  layers = [
+    var.clamav_layer_arn
+  ]
 
   environment {
     variables = {
-      SAFE_BUCKET = aws_s3_bucket.uploads_clean.bucket
+      # You can add things like LOG_LEVEL here if your handler uses them
+      LOG_LEVEL = "INFO"
     }
   }
 
   tags = {
-    Name = "${var.app_name}-scan-lambda"
+    Name        = "${var.app_name}-scan-lambda"
+    Environment = "prod"
   }
 }
 
 ########################
-# S3 -> Lambda trigger on RAW bucket
+# S3 → Lambda notification
 ########################
 
 resource "aws_lambda_permission" "allow_s3_invoke" {
-  statement_id  = "AllowExecutionFromS3UploadsRaw"
+  statement_id  = "AllowExecutionFromS3"
   action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.scan.arn
+  function_name = aws_lambda_function.scan.function_name
   principal     = "s3.amazonaws.com"
-  source_arn    = aws_s3_bucket.uploads_raw.arn
+  source_arn    = aws_s3_bucket.uploads.arn
 }
 
-resource "aws_s3_bucket_notification" "uploads_raw_notification" {
-  bucket = aws_s3_bucket.uploads_raw.id
+resource "aws_s3_bucket_notification" "uploads_notification" {
+  bucket = aws_s3_bucket.uploads.id
 
   lambda_function {
     lambda_function_arn = aws_lambda_function.scan.arn
