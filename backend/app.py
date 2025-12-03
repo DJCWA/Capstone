@@ -1,198 +1,239 @@
 import os
 import uuid
-from datetime import datetime, timezone
+import logging
+import datetime as dt
 
-import boto3
-from botocore.exceptions import ClientError
 from flask import Flask, request, jsonify
-from boto3.dynamodb.conditions import Key
+import boto3
+from botocore.exceptions import BotoCoreError, ClientError
+from boto3.dynamodb.conditions import Key, Attr  # ✅ Added Attr
+
+# ------------------------------------------------------------------------------
+# Basic Flask + logging setup
+# ------------------------------------------------------------------------------
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# -------------------------------------------------------------------
-# Environment / AWS setup
-# -------------------------------------------------------------------
+# ------------------------------------------------------------------------------
+# AWS config – these MUST match your ECS task environment variables
+# ------------------------------------------------------------------------------
 
-UPLOAD_BUCKET = os.environ.get("UPLOAD_BUCKET")
-SCAN_TABLE_NAME = os.environ.get("SCAN_TABLE")
+UPLOAD_BUCKET = os.environ.get("UPLOAD_BUCKET")  # S3 bucket for uploaded files
+SCAN_TABLE = os.environ.get("SCAN_TABLE")        # DynamoDB table for scan records
 
-if not UPLOAD_BUCKET or not SCAN_TABLE_NAME:
-  raise RuntimeError(
-      "UPLOAD_BUCKET and SCAN_TABLE environment variables must be set for the backend."
-  )
+if not UPLOAD_BUCKET:
+    logger.warning("UPLOAD_BUCKET env var is not set – uploads will fail until this is configured.")
+if not SCAN_TABLE:
+    logger.warning("SCAN_TABLE env var is not set – scan-status will fail until this is configured.")
 
 s3 = boto3.client("s3")
 dynamodb = boto3.resource("dynamodb")
-scan_table = dynamodb.Table(SCAN_TABLE_NAME)
 
+def get_scan_table():
+    if not SCAN_TABLE:
+        raise RuntimeError("SCAN_TABLE env var not set in backend container.")
+    return dynamodb.Table(SCAN_TABLE)
 
-def utc_now_iso() -> str:
-  """Return current UTC time in ISO-8601 format."""
-  return datetime.now(timezone.utc).isoformat()
+# ------------------------------------------------------------------------------
+# Helper: build consistent JSON error responses
+# ------------------------------------------------------------------------------
 
+def error_response(message: str, status_code: int = 500):
+    logger.error("API error (%s): %s", status_code, message)
+    return jsonify({"error": message}), status_code
 
-# -------------------------------------------------------------------
-# Health check
-# -------------------------------------------------------------------
+# ------------------------------------------------------------------------------
+# Route: health check (good for debugging)
+# ------------------------------------------------------------------------------
 
 @app.route("/api/health", methods=["GET"])
 def health():
-  return jsonify({"status": "ok"}), 200
+    return jsonify({"status": "ok", "upload_bucket": UPLOAD_BUCKET, "scan_table": SCAN_TABLE})
 
-
-# -------------------------------------------------------------------
-# Upload endpoint
-# 1) Accepts a file
-# 2) Uploads to S3 (triggers Lambda scan)
-# 3) Inserts a PENDING record into DynamoDB
-# -------------------------------------------------------------------
+# ------------------------------------------------------------------------------
+# Route: /api/upload – receives file, stores to S3, creates PENDING record in DynamoDB
+# ------------------------------------------------------------------------------
 
 @app.route("/api/upload", methods=["POST"])
 def upload_file():
-  if "file" not in request.files:
-    return jsonify({"error": "No file part in request"}), 400
+    try:
+        if not UPLOAD_BUCKET:
+            return error_response("UPLOAD_BUCKET env var is not configured on backend service.", 500)
 
-  file = request.files["file"]
-  if not file or file.filename == "":
-    return jsonify({"error": "No file selected"}), 400
+        if "file" not in request.files:
+            return error_response("No file part in request. Expected field name 'file'.", 400)
 
-  original_name = file.filename
-  file_id = str(uuid.uuid4())
-  s3_key = f"uploads/{file_id}/{original_name}"
-  scan_timestamp = utc_now_iso()  # 🔴 MUST exist because it's the sort key
+        file_storage = request.files["file"]
+        if file_storage.filename == "":
+            return error_response("Empty filename – please select a file.", 400)
 
-  try:
-    # 1) Upload the file to S3 (this will trigger the Lambda scanner)
-    s3.upload_fileobj(file, UPLOAD_BUCKET, s3_key)
+        original_name = file_storage.filename
+        file_id = str(uuid.uuid4())
+        s3_key = f"uploads/{file_id}/{original_name}"
 
-    # 2) Insert initial PENDING record into DynamoDB
-    item = {
-        "file_id": file_id,
-        "scan_timestamp": scan_timestamp,  # 🔴 REQUIRED sort key
-        "file_name": original_name,
-        "bucket": UPLOAD_BUCKET,
-        "s3_key": s3_key,
-        "status": "PENDING",
-        "uploaded_at": scan_timestamp,
-        # These can be filled in later by the Lambda after scan:
-        "scan_result": "PENDING",
-        "details": "Waiting for ClamAV scan to complete",
-    }
+        logger.info("Uploading file to S3: bucket=%s key=%s", UPLOAD_BUCKET, s3_key)
 
-    scan_table.put_item(Item=item)
+        # Upload file to S3
+        try:
+            s3.upload_fileobj(
+                Fileobj=file_storage,
+                Bucket=UPLOAD_BUCKET,
+                Key=s3_key,
+                ExtraArgs={"ServerSideEncryption": "AES256"},
+            )
+        except (BotoCoreError, ClientError) as e:
+            logger.exception("Failed to upload file to S3.")
+            return error_response(f"Failed to upload file to S3: {e}", 500)
 
-  except ClientError as e:
-    # Bubble up the exact error message so you see it in the frontend
-    return (
-        jsonify(
+        # Create PENDING scan record in DynamoDB
+        try:
+            table = get_scan_table()
+            now_iso = dt.datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            scan_timestamp = now_iso  # ✅ sort key for DynamoDB
+
+            table.put_item(
+                Item={
+                    # 🔴 These two are the KEY attributes in your table:
+                    "file_id": file_id,
+                    "scan_timestamp": scan_timestamp,
+
+                    "file_name": original_name,
+                    "s3_bucket": UPLOAD_BUCKET,
+                    "s3_key": s3_key,
+                    "scan_status": "PENDING",
+                    "scan_detail": "Waiting for Lambda scanner to run.",
+                    "scan_events": [
+                        {
+                            "timestamp": now_iso,
+                            "message": "File uploaded to S3 and scan record created.",
+                        }
+                    ],
+                    "created_at": now_iso,
+                    "updated_at": now_iso,
+                }
+            )
+        except (BotoCoreError, ClientError, RuntimeError) as e:
+            logger.exception("Failed to write scan record to DynamoDB.")
+            return error_response(f"Failed to write scan record to DynamoDB: {e}", 500)
+
+        logger.info("Upload + PENDING record created. file_id=%s", file_id)
+
+        return jsonify(
             {
-                "error": f"Failed to write scan record to DynamoDB: {e}"
+                "file_id": file_id,
+                "file_name": original_name,
+                "status": "PENDING",
+                "detail": "File uploaded. Waiting for scan to start.",
             }
-        ),
-        500,
-    )
-  except Exception as e:
-    return jsonify({"error": f"Unexpected error: {e}"}), 500
+        ), 200
 
-  return (
-      jsonify(
-          {
-              "message": "File uploaded and queued for scanning",
-              "file_id": file_id,
-              "status": "PENDING",
-          }
-      ),
-      200,
-  )
+    except Exception as e:
+        # Catch-all so we NEVER return HTML 500, always JSON
+        logger.exception("Unhandled exception in /api/upload")
+        return error_response(f"Unhandled exception in /api/upload: {e}", 500)
 
+# ------------------------------------------------------------------------------
+# Route: /api/scan-status – returns scan status + events from DynamoDB
+# Now:
+#   1) Tries Query (fast if key schema matches)
+#   2) Falls back to Scan + FilterExpression on file_id
+# ------------------------------------------------------------------------------
 
-# -------------------------------------------------------------------
-# Get latest scan status for a given file_id
-# - Lambda can write multiple records for same file_id with different
-#   scan_timestamp values (PENDING, CLEAN, INFECTED, etc.)
-# - This endpoint returns the latest one.
-# -------------------------------------------------------------------
+@app.route("/api/scan-status", methods=["GET"])
+def scan_status():
+    try:
+        file_id = request.args.get("file_id")
+        if not file_id:
+            return error_response("Missing required query parameter 'file_id'.", 400)
 
-@app.route("/api/scan-status/<file_id>", methods=["GET"])
-def scan_status(file_id):
-  try:
-    response = scan_table.query(
-        KeyConditionExpression=Key("file_id").eq(file_id)
-    )
-    items = response.get("Items", [])
+        if not SCAN_TABLE:
+            return error_response("SCAN_TABLE env var is not configured on backend service.", 500)
 
-    if not items:
-      return jsonify({"error": "No scan record found for this file_id"}), 404
+        logger.info("Fetching scan status for file_id=%s", file_id)
 
-    # Sort by scan_timestamp descending (latest first)
-    items.sort(
-        key=lambda x: x.get("scan_timestamp", ""),
-        reverse=True,
-    )
-    latest = items[0]
+        try:
+            table = get_scan_table()
 
-    return jsonify(latest), 200
+            # ---- Fast path: Query on partition key (if schema matches) ----
+            items = []
+            try:
+                resp = table.query(
+                    KeyConditionExpression=Key("file_id").eq(file_id),
+                    ScanIndexForward=False,  # newest first if sort key exists
+                    Limit=1,
+                    ConsistentRead=True,
+                )
+                items = resp.get("Items", [])
+                logger.info("Query result for file_id=%s: %d item(s)", file_id, len(items))
+            except Exception as qe:
+                logger.warning(
+                    "Query on file_id=%s failed, will fall back to Scan. Error: %s",
+                    file_id,
+                    qe,
+                )
+                items = []
 
-  except ClientError as e:
-    return (
-        jsonify(
+            # ---- Fallback: Scan + filter by file_id (works even if key schema differs) ----
+            if not items:
+                resp = table.scan(
+                    FilterExpression=Attr("file_id").eq(file_id),
+                    ConsistentRead=True,
+                )
+                items = resp.get("Items", [])
+                logger.info("Scan result for file_id=%s: %d item(s)", file_id, len(items))
+
+        except (BotoCoreError, ClientError, RuntimeError) as e:
+            logger.exception("Failed to read scan record from DynamoDB.")
+            return error_response(f"Failed to read scan record from DynamoDB: {e}", 500)
+
+        if not items:
+            return error_response(f"No record found for file_id={file_id}", 404)
+
+        item = items[0]
+
+        status = item.get("scan_status", "UNKNOWN")
+        detail = item.get("scan_detail", "No detail provided.")
+        events = item.get("scan_events", [])
+
+        # Normalize events for frontend
+        normalized_events = []
+        for e in events:
+            if isinstance(e, dict):
+                normalized_events.append(
+                    {
+                        "timestamp": e.get("timestamp", ""),
+                        "message": e.get("message", ""),
+                    }
+                )
+            else:
+                normalized_events.append(
+                    {
+                        "timestamp": "",
+                        "message": str(e),
+                    }
+                )
+
+        return jsonify(
             {
-                "error": f"Failed to read scan record from DynamoDB: {e}"
+                "file_id": item.get("file_id", file_id),
+                "file_name": item.get("file_name", ""),
+                "status": status,
+                "detail": detail,
+                "events": normalized_events,
             }
-        ),
-        500,
-    )
-  except Exception as e:
-    return jsonify({"error": f"Unexpected error: {e}"}), 500
+        ), 200
 
+    except Exception as e:
+        logger.exception("Unhandled exception in /api/scan-status")
+        return error_response(f"Unhandled exception in /api/scan-status: {e}", 500)
 
-# -------------------------------------------------------------------
-# List recent scans (for dashboard)
-# - For small tables, a Scan + in-memory sort is fine.
-# -------------------------------------------------------------------
-
-@app.route("/api/scans", methods=["GET"])
-def list_scans():
-  try:
-    # You can adjust Limit or add pagination later if needed
-    response = scan_table.scan()
-    items = response.get("Items", [])
-
-    # Sort by scan_timestamp descending so newest appear first
-    items.sort(
-        key=lambda x: x.get("scan_timestamp", ""),
-        reverse=True,
-    )
-
-    return jsonify({"items": items}), 200
-
-  except ClientError as e:
-    return (
-        jsonify(
-            {
-                "error": f"Failed to list scan records from DynamoDB: {e}"
-            }
-        ),
-        500,
-    )
-  except Exception as e:
-    return jsonify({"error": f"Unexpected error: {e}"}), 500
-
-
-# -------------------------------------------------------------------
-# Root (optional – just to avoid 404 if someone curls backend directly)
-# -------------------------------------------------------------------
-
-@app.route("/", methods=["GET"])
-def root():
-  return jsonify(
-      {
-          "service": "Capstone Group 6 File Scanner Backend",
-          "status": "running",
-      }
-  )
-
+# ------------------------------------------------------------------------------
+# Local dev entrypoint (ECS will use app:app via gunicorn or similar)
+# ------------------------------------------------------------------------------
 
 if __name__ == "__main__":
-  # Useful for local testing; in ECS you'll use gunicorn
-  app.run(host="0.0.0.0", port=8080, debug=True)
+    # For local testing only
+    app.run(host="0.0.0.0", port=5000, debug=True)

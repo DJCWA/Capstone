@@ -13,7 +13,7 @@ variable "dr_region" {
 variable "app_name" {
   description = "Prefix for resource names (must be globally unique for S3 buckets)"
   type        = string
-  default     = "allen-capstone-group6"
+  default     = "capstone-group6"
 }
 
 variable "frontend_image" {
