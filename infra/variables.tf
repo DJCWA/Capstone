@@ -31,5 +31,5 @@ variable "backend_image" {
 variable "clamav_layer_arn" {
   description = "ARN of the pre-built ClamAV Lambda layer"
   type        = string
-  default     = "arn:aws:lambda:ca-central-1:448923944643:layer:allen-captone-clamav:1"
+  default     = "arn:aws:lambda:ca-central-1:448923944643:layer:allen-captone-clamav:2"
 }
