@@ -6,7 +6,7 @@ import datetime as dt
 from flask import Flask, request, jsonify
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
-from boto3.dynamodb.conditions import Key, Attr  # ✅ For scan-status fallback
+from boto3.dynamodb.conditions import Key, Attr
 
 # ----------------------------------------------------------------------
 # Basic Flask + logging setup
@@ -25,9 +25,13 @@ UPLOAD_BUCKET = os.environ.get("UPLOAD_BUCKET")  # S3 bucket for uploaded files
 SCAN_TABLE = os.environ.get("SCAN_TABLE")        # DynamoDB table for scan records
 
 if not UPLOAD_BUCKET:
-    logger.warning("UPLOAD_BUCKET env var is not set – uploads will fail until this is configured.")
+    logger.warning(
+        "UPLOAD_BUCKET env var is not set – uploads will fail until this is configured."
+    )
 if not SCAN_TABLE:
-    logger.warning("SCAN_TABLE env var is not set – scan-status will fail until this is configured.")
+    logger.warning(
+        "SCAN_TABLE env var is not set – scan-status will fail until this is configured."
+    )
 
 s3 = boto3.client("s3")
 dynamodb = boto3.resource("dynamodb")
@@ -72,23 +76,26 @@ def alb_health():
     """
     Minimal health endpoint for the ALB target group.
     ALB is configured to call /health and expects 200-399.
-    We keep this very lightweight.
     """
     return jsonify({"status": "ok"}), 200
 
 
 # ----------------------------------------------------------------------
-# Route: /api/upload – receives file, stores to S3, creates PENDING record in DynamoDB
+# Route: /api/upload – receives file, stores to S3, creates PENDING record
 # ----------------------------------------------------------------------
 
 @app.route("/api/upload", methods=["POST"])
 def upload_file():
     try:
         if not UPLOAD_BUCKET:
-            return error_response("UPLOAD_BUCKET env var is not configured on backend service.", 500)
+            return error_response(
+                "UPLOAD_BUCKET env var is not configured on backend service.", 500
+            )
 
         if "file" not in request.files:
-            return error_response("No file part in request. Expected field name 'file'.", 400)
+            return error_response(
+                "No file part in request. Expected field name 'file'.", 400
+            )
 
         file_storage = request.files["file"]
         if file_storage.filename == "":
@@ -120,7 +127,7 @@ def upload_file():
 
             table.put_item(
                 Item={
-                    # ✅ These two are the KEY attributes in your table
+                    # ✅ KEY attributes in your table:
                     "file_id": file_id,
                     "scan_timestamp": scan_timestamp,
 
@@ -155,15 +162,12 @@ def upload_file():
         ), 200
 
     except Exception as e:
-        # Catch-all so we NEVER return HTML 500, always JSON
         logger.exception("Unhandled exception in /api/upload")
         return error_response(f"Unhandled exception in /api/upload: {e}", 500)
 
 
 # ----------------------------------------------------------------------
 # Route: /api/scan-status – returns scan status + events from DynamoDB
-# 1) Tries Query (fast if key schema matches)
-# 2) Falls back to Scan + FilterExpression on file_id
 # ----------------------------------------------------------------------
 
 @app.route("/api/scan-status", methods=["GET"])
@@ -174,7 +178,9 @@ def scan_status():
             return error_response("Missing required query parameter 'file_id'.", 400)
 
         if not SCAN_TABLE:
-            return error_response("SCAN_TABLE env var is not configured on backend service.", 500)
+            return error_response(
+                "SCAN_TABLE env var is not configured on backend service.", 500
+            )
 
         logger.info("Fetching scan status for file_id=%s", file_id)
 
@@ -191,7 +197,9 @@ def scan_status():
                     ConsistentRead=True,
                 )
                 items = resp.get("Items", [])
-                logger.info("Query result for file_id=%s: %d item(s)", file_id, len(items))
+                logger.info(
+                    "Query result for file_id=%s: %d item(s)", file_id, len(items)
+                )
             except Exception as qe:
                 logger.warning(
                     "Query on file_id=%s failed, will fall back to Scan. Error: %s",
@@ -200,14 +208,16 @@ def scan_status():
                 )
                 items = []
 
-            # ---- Fallback: Scan + filter by file_id (works even if key schema differs) ----
+            # ---- Fallback: Scan + filter by file_id ----
             if not items:
                 resp = table.scan(
                     FilterExpression=Attr("file_id").eq(file_id),
                     ConsistentRead=True,
                 )
                 items = resp.get("Items", [])
-                logger.info("Scan result for file_id=%s: %d item(s)", file_id, len(items))
+                logger.info(
+                    "Scan result for file_id=%s: %d item(s)", file_id, len(items)
+                )
 
         except (BotoCoreError, ClientError, RuntimeError) as e:
             logger.exception("Failed to read scan record from DynamoDB.")
@@ -218,7 +228,19 @@ def scan_status():
 
         item = items[0]
 
-        status = item.get("scan_status", "UNKNOWN")
+        # 🔐 Normalize scan_status so the frontend only ever sees known values
+        raw_status = item.get("scan_status", "UNKNOWN")
+        status = str(raw_status).upper()
+        allowed_statuses = {"PENDING", "RUNNING", "CLEAN", "INFECTED", "ERROR"}
+
+        if status not in allowed_statuses:
+            logger.warning(
+                "Unexpected scan_status value '%s' for file_id=%s – mapping to ERROR",
+                raw_status,
+                file_id,
+            )
+            status = "ERROR"
+
         detail = item.get("scan_detail", "No detail provided.")
         events = item.get("scan_events", [])
 

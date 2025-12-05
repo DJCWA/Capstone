@@ -1,11 +1,8 @@
 // frontend/app.js
 
 // IMPORTANT: align these with your Flask backend routes.
-// If your backend uses different paths, change them here.
-const API_UPLOAD_URL = "api/upload";           // was "/api/upload" before
-const API_STATUS_URL = "api/scan-status";      // adjust if your route name differs
-// Expecting GET /scan-status?file_id=... returning:
-// { file_id, file_name, status, detail, events: [{ timestamp, message }, ...] }
+const API_UPLOAD_URL = "api/upload";       // behind ALB, no leading slash
+const API_STATUS_URL = "api/scan-status";  // GET ?file_id=...
 
 const POLL_INTERVAL_MS = 3000;
 
@@ -25,6 +22,10 @@ document.addEventListener("DOMContentLoaded", () => {
   const statusTextEl = document.getElementById("statusText");
   const detailTextEl = document.getElementById("detailText");
   const eventsLogEl = document.getElementById("eventsLog");
+
+  // ---------------------------------------------------------------------------
+  // Helpers
+  // ---------------------------------------------------------------------------
 
   function setStatusPill(status) {
     const normalized = (status || "IDLE").toUpperCase();
@@ -49,6 +50,11 @@ document.addEventListener("DOMContentLoaded", () => {
       case "INFECTED":
         variantClass = "status-infected";
         label = "INFECTED";
+        break;
+      case "FAILED":
+      case "ERROR":
+        variantClass = "status-error";
+        label = normalized;
         break;
       default:
         variantClass = "status-idle";
@@ -92,7 +98,9 @@ document.addEventListener("DOMContentLoaded", () => {
 
   function setLoading(isLoading) {
     uploadButton.disabled = isLoading;
-    uploadButton.textContent = isLoading ? "Uploading & scanning…" : "Upload & Scan";
+    uploadButton.textContent = isLoading
+      ? "Uploading & scanning…"
+      : "Upload & Scan";
   }
 
   function resetStatus() {
@@ -106,133 +114,6 @@ document.addEventListener("DOMContentLoaded", () => {
     detailTextEl.textContent = "—";
     setStatusPill("IDLE");
     clearEvents();
-  }
-
-  async function handleUpload(evt) {
-    evt.preventDefault();
-    if (!fileInput.files || fileInput.files.length === 0) {
-      alert("Please choose a file to upload.");
-      return;
-    }
-
-    const file = fileInput.files[0];
-    setLoading(true);
-    clearInterval(pollTimer);
-    pollTimer = null;
-    clearEvents();
-
-    fileNameEl.textContent = file.name;
-    statusTextEl.textContent = "Uploading file to backend…";
-    detailTextEl.textContent = "—";
-    setStatusPill("PENDING");
-
-    try {
-      const formData = new FormData();
-      formData.append("file", file);
-
-      const resp = await fetch(API_UPLOAD_URL, {
-        method: "POST",
-        body: formData,
-      });
-
-      const responseText = await resp.text(); // read text once
-
-      if (!resp.ok) {
-        // Try to parse JSON if possible, otherwise show raw text
-        let extraDetail = responseText;
-        try {
-          const maybeJson = JSON.parse(responseText);
-          if (maybeJson.detail || maybeJson.error) {
-            extraDetail = maybeJson.detail || maybeJson.error;
-          }
-        } catch (_) {
-          // ignore JSON parse error, keep extraDetail as raw text
-        }
-        throw new Error(
-          `Upload failed with status ${resp.status}. Backend said: ${extraDetail}`
-        );
-      }
-
-      // If response was JSON, parse it again from the text we already have
-      const data = JSON.parse(responseText || "{}");
-      const fileId = data.file_id || data.id || null;
-
-      if (!fileId) {
-        throw new Error("Backend response missing file_id.");
-      }
-
-      currentFileId = fileId;
-      fileIdEl.textContent = fileId;
-      statusTextEl.textContent = "File uploaded. Waiting for scan to start…";
-      appendEvent({
-        message: "File uploaded successfully. Scan will start shortly.",
-      });
-
-      // Start polling
-      setStatusPill("PENDING");
-      pollTimer = setInterval(pollStatus, POLL_INTERVAL_MS);
-      // Fire first poll immediately
-      pollStatus();
-    } catch (err) {
-      console.error(err);
-      statusTextEl.textContent = "Upload failed.";
-      detailTextEl.textContent = err.message || String(err);
-      setStatusPill("IDLE");
-      appendEvent({ message: "Upload failed – see details above." });
-    } finally {
-      setLoading(false);
-      // Clear selection so user can re-upload same file if needed
-      uploadForm.reset();
-    }
-  }
-
-  async function pollStatus() {
-    if (!currentFileId) return;
-
-    try {
-      const url = `${API_STATUS_URL}?file_id=${encodeURIComponent(currentFileId)}`;
-      const resp = await fetch(url);
-      const responseText = await resp.text();
-
-      if (!resp.ok) {
-        throw new Error(
-          `Status check failed with ${resp.status}. Body: ${responseText}`
-        );
-      }
-
-      const data = JSON.parse(responseText || "{}");
-      const status = (data.status || "PENDING").toUpperCase();
-      const detail = data.detail || data.scan_detail || "—";
-
-      statusTextEl.textContent = status;
-      detailTextEl.textContent = detail;
-      setStatusPill(status);
-
-      if (data.file_name) {
-        fileNameEl.textContent = data.file_name;
-      }
-      if (data.file_id) {
-        fileIdEl.textContent = data.file_id;
-      }
-
-      if (Array.isArray(data.events)) {
-        renderEvents(data.events);
-      }
-
-      // Stop polling on terminal states
-      if (status === "CLEAN" || status === "INFECTED" || status === "FAILED") {
-        clearInterval(pollTimer);
-        pollTimer = null;
-        appendEvent({
-          message: `Scan finished with status: ${status}.`,
-        });
-      }
-    } catch (err) {
-      console.error(err);
-      appendEvent({
-        message: `Error checking scan status: ${err.message || String(err)}`,
-      });
-    }
   }
 
   function appendEvent(evt) {
@@ -264,7 +145,151 @@ document.addEventListener("DOMContentLoaded", () => {
       .replace(/'/g, "&#039;");
   }
 
-  // Drag & drop enhancements for the dropzone
+  // ---------------------------------------------------------------------------
+  // Upload handler
+  // ---------------------------------------------------------------------------
+
+  async function handleUpload(evt) {
+    evt.preventDefault();
+    if (!fileInput.files || fileInput.files.length === 0) {
+      alert("Please choose a file to upload.");
+      return;
+    }
+
+    const file = fileInput.files[0];
+    setLoading(true);
+    clearInterval(pollTimer);
+    pollTimer = null;
+    clearEvents();
+
+    fileNameEl.textContent = file.name;
+    statusTextEl.textContent = "Uploading file to backend…";
+    detailTextEl.textContent = "—";
+    setStatusPill("PENDING");
+
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+
+      const resp = await fetch(API_UPLOAD_URL, {
+        method: "POST",
+        body: formData,
+      });
+
+      const responseText = await resp.text(); // read once
+
+      if (!resp.ok) {
+        // Try parse JSON, otherwise raw text
+        let extraDetail = responseText;
+        try {
+          const maybeJson = JSON.parse(responseText);
+          if (maybeJson.detail || maybeJson.error) {
+            extraDetail = maybeJson.detail || maybeJson.error;
+          }
+        } catch (_) {
+          // ignore parse error
+        }
+        throw new Error(
+          `Upload failed with status ${resp.status}. Backend said: ${extraDetail}`
+        );
+      }
+
+      const data = JSON.parse(responseText || "{}");
+      const fileId = data.file_id || data.id || null;
+
+      if (!fileId) {
+        throw new Error("Backend response missing file_id.");
+      }
+
+      currentFileId = fileId;
+      fileIdEl.textContent = fileId;
+      statusTextEl.textContent =
+        "File uploaded. Waiting for scan to start…";
+      appendEvent({
+        message: "File uploaded successfully. Scan will start shortly.",
+      });
+
+      // start polling
+      setStatusPill("PENDING");
+      pollTimer = setInterval(pollStatus, POLL_INTERVAL_MS);
+      // fire first poll immediately
+      pollStatus();
+    } catch (err) {
+      console.error(err);
+      statusTextEl.textContent = "Upload failed.";
+      detailTextEl.textContent = err.message || String(err);
+      setStatusPill("ERROR");
+      appendEvent({ message: "Upload failed – see details above." });
+    } finally {
+      setLoading(false);
+      // clear selection so same file can be re-uploaded
+      uploadForm.reset();
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Poll scan status
+  // ---------------------------------------------------------------------------
+
+  async function pollStatus() {
+    if (!currentFileId) return;
+
+    try {
+      const url = `${API_STATUS_URL}?file_id=${encodeURIComponent(
+        currentFileId
+      )}`;
+      const resp = await fetch(url);
+      const responseText = await resp.text();
+
+      if (!resp.ok) {
+        throw new Error(
+          `Status check failed with ${resp.status}. Body: ${responseText}`
+        );
+      }
+
+      const data = JSON.parse(responseText || "{}");
+      const statusRaw = data.status || data.scan_status || "PENDING";
+      const status = statusRaw.toUpperCase();
+      const detail = data.detail || data.scan_detail || "—";
+
+      statusTextEl.textContent = status;
+      detailTextEl.textContent = detail;
+      setStatusPill(status);
+
+      if (data.file_name) {
+        fileNameEl.textContent = data.file_name;
+      }
+      if (data.file_id) {
+        fileIdEl.textContent = data.file_id;
+      }
+
+      if (Array.isArray(data.events)) {
+        renderEvents(data.events);
+      }
+
+      // Treat these as terminal states and stop polling
+      const terminal = ["CLEAN", "INFECTED", "FAILED", "ERROR"];
+      if (terminal.includes(status)) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+        appendEvent({
+          message: `Scan finished with status: ${status}.`,
+        });
+      }
+    } catch (err) {
+      console.error(err);
+      appendEvent({
+        message: `Error checking scan status: ${
+          err.message || String(err)
+        }`,
+      });
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Drag & drop / UI wiring
+  // ---------------------------------------------------------------------------
+
   dropzone.addEventListener("click", () => fileInput.click());
 
   dropzone.addEventListener("dragover", (e) => {
@@ -291,6 +316,6 @@ document.addEventListener("DOMContentLoaded", () => {
 
   uploadForm.addEventListener("submit", handleUpload);
 
-  // Initialize
+  // Initial UI state
   resetStatus();
 });
