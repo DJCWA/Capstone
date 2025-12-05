@@ -6,20 +6,20 @@ import datetime as dt
 from flask import Flask, request, jsonify
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
-from boto3.dynamodb.conditions import Key, Attr  # ✅ Added Attr
+from boto3.dynamodb.conditions import Key, Attr  # ✅ For scan-status fallback
 
-# ------------------------------------------------------------------------------
+# ----------------------------------------------------------------------
 # Basic Flask + logging setup
-# ------------------------------------------------------------------------------
+# ----------------------------------------------------------------------
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# ------------------------------------------------------------------------------
-# AWS config – these MUST match your ECS task environment variables
-# ------------------------------------------------------------------------------
+# ----------------------------------------------------------------------
+# AWS config – must match ECS task environment variables
+# ----------------------------------------------------------------------
 
 UPLOAD_BUCKET = os.environ.get("UPLOAD_BUCKET")  # S3 bucket for uploaded files
 SCAN_TABLE = os.environ.get("SCAN_TABLE")        # DynamoDB table for scan records
@@ -32,30 +32,54 @@ if not SCAN_TABLE:
 s3 = boto3.client("s3")
 dynamodb = boto3.resource("dynamodb")
 
+
 def get_scan_table():
     if not SCAN_TABLE:
         raise RuntimeError("SCAN_TABLE env var not set in backend container.")
     return dynamodb.Table(SCAN_TABLE)
 
-# ------------------------------------------------------------------------------
+
+# ----------------------------------------------------------------------
 # Helper: build consistent JSON error responses
-# ------------------------------------------------------------------------------
+# ----------------------------------------------------------------------
 
 def error_response(message: str, status_code: int = 500):
     logger.error("API error (%s): %s", status_code, message)
     return jsonify({"error": message}), status_code
 
-# ------------------------------------------------------------------------------
-# Route: health check (good for debugging)
-# ------------------------------------------------------------------------------
+
+# ----------------------------------------------------------------------
+# Health check endpoints
+# ----------------------------------------------------------------------
 
 @app.route("/api/health", methods=["GET"])
-def health():
-    return jsonify({"status": "ok", "upload_bucket": UPLOAD_BUCKET, "scan_table": SCAN_TABLE})
+def debug_health():
+    """
+    Debug-style health endpoint (shows config).
+    Useful to curl from inside the container.
+    """
+    return jsonify(
+        {
+            "status": "ok",
+            "upload_bucket": UPLOAD_BUCKET,
+            "scan_table": SCAN_TABLE,
+        }
+    ), 200
 
-# ------------------------------------------------------------------------------
+
+@app.route("/health", methods=["GET"])
+def alb_health():
+    """
+    Minimal health endpoint for the ALB target group.
+    ALB is configured to call /health and expects 200-399.
+    We keep this very lightweight.
+    """
+    return jsonify({"status": "ok"}), 200
+
+
+# ----------------------------------------------------------------------
 # Route: /api/upload – receives file, stores to S3, creates PENDING record in DynamoDB
-# ------------------------------------------------------------------------------
+# ----------------------------------------------------------------------
 
 @app.route("/api/upload", methods=["POST"])
 def upload_file():
@@ -92,11 +116,11 @@ def upload_file():
         try:
             table = get_scan_table()
             now_iso = dt.datetime.utcnow().isoformat(timespec="seconds") + "Z"
-            scan_timestamp = now_iso  # ✅ sort key for DynamoDB
+            scan_timestamp = now_iso  # sort key for DynamoDB
 
             table.put_item(
                 Item={
-                    # 🔴 These two are the KEY attributes in your table:
+                    # ✅ These two are the KEY attributes in your table
                     "file_id": file_id,
                     "scan_timestamp": scan_timestamp,
 
@@ -135,12 +159,12 @@ def upload_file():
         logger.exception("Unhandled exception in /api/upload")
         return error_response(f"Unhandled exception in /api/upload: {e}", 500)
 
-# ------------------------------------------------------------------------------
+
+# ----------------------------------------------------------------------
 # Route: /api/scan-status – returns scan status + events from DynamoDB
-# Now:
-#   1) Tries Query (fast if key schema matches)
-#   2) Falls back to Scan + FilterExpression on file_id
-# ------------------------------------------------------------------------------
+# 1) Tries Query (fast if key schema matches)
+# 2) Falls back to Scan + FilterExpression on file_id
+# ----------------------------------------------------------------------
 
 @app.route("/api/scan-status", methods=["GET"])
 def scan_status():
@@ -230,10 +254,11 @@ def scan_status():
         logger.exception("Unhandled exception in /api/scan-status")
         return error_response(f"Unhandled exception in /api/scan-status: {e}", 500)
 
-# ------------------------------------------------------------------------------
-# Local dev entrypoint (ECS will use app:app via gunicorn or similar)
-# ------------------------------------------------------------------------------
+
+# ----------------------------------------------------------------------
+# Local dev entrypoint (ECS uses gunicorn or similar)
+# ----------------------------------------------------------------------
 
 if __name__ == "__main__":
-    # For local testing only
+    # For local testing only (ECS will bind via gunicorn on 0.0.0.0:8080)
     app.run(host="0.0.0.0", port=5000, debug=True)
