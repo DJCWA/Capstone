@@ -9,57 +9,32 @@ import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 from boto3.dynamodb.conditions import Key
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
-
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 # ---------------------------------------------------------------------------
-# AWS clients / config
+# AWS setup
 # ---------------------------------------------------------------------------
 
 s3 = boto3.client("s3")
 dynamodb = boto3.resource("dynamodb")
 
 SCAN_TABLE = os.environ.get("SCAN_TABLE")
-UPLOAD_BUCKET = os.environ.get("UPLOAD_BUCKET")   # not strictly needed, but kept for reference
-CLEAN_BUCKET = os.environ.get("CLEAN_BUCKET")     # optional: copy CLEAN files here
+UPLOAD_BUCKET = os.environ.get("UPLOAD_BUCKET")
+CLEAN_BUCKET = os.environ.get("CLEAN_BUCKET")
 
 if not SCAN_TABLE:
     logger.warning("SCAN_TABLE env var is not set; Lambda will not be able to update scan records.")
 
 scan_table = dynamodb.Table(SCAN_TABLE) if SCAN_TABLE else None
 
-# ---------------------------------------------------------------------------
-# ClamAV paths from the Lambda layer
-# ---------------------------------------------------------------------------
-
-CLAMSCAN_PATH = "/opt/bin/clamscan"
-CLAM_LIB_DIR = "/opt/lib64"
-CLAM_DB_DIR = "/opt/share/clamav"
-
-# Ensure ClamAV can see its libs and database
-os.environ["LD_LIBRARY_PATH"] = f"{CLAM_LIB_DIR}:{os.environ.get('LD_LIBRARY_PATH', '')}"
-os.environ["PATH"] = f"/opt/bin:{os.environ.get('PATH', '')}"
-os.environ["CLAMAVLIB"] = CLAM_LIB_DIR
-os.environ["CLAMAVDB"] = CLAM_DB_DIR
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def now_iso() -> str:
-    """Return UTC timestamp in ISO8601 with seconds precision and a Z suffix."""
     return datetime.utcnow().isoformat(timespec="seconds") + "Z"
 
 
 def extract_file_id_from_key(key: str) -> str | None:
-    """
-    Expect keys like: uploads/<file_id>/<filename>
-    Return file_id, or None if pattern doesn't match.
-    """
+    # Expect keys like uploads/<file_id>/<filename>
     parts = key.split("/")
     if len(parts) < 3 or parts[0] != "uploads":
         return None
@@ -67,17 +42,13 @@ def extract_file_id_from_key(key: str) -> str | None:
 
 
 def find_latest_scan_record(file_id: str) -> dict | None:
-    """
-    Query DynamoDB by file_id and return the most recent item
-    (sorted by sort key scan_timestamp).
-    """
     if not scan_table:
         return None
 
     try:
         resp = scan_table.query(
             KeyConditionExpression=Key("file_id").eq(file_id),
-            ScanIndexForward=False,  # newest first
+            ScanIndexForward=False,
             Limit=1,
             ConsistentRead=True,
         )
@@ -93,16 +64,11 @@ def find_latest_scan_record(file_id: str) -> dict | None:
 
 
 def append_scan_result(item_key: dict, status: str, detail: str, extra_events: list[dict] | None = None):
-    """
-    Update DynamoDB record with final scan status and append scan_events.
-    Status will be one of: CLEAN, INFECTED, ERROR.
-    """
     if not scan_table:
         logger.error("SCAN_TABLE not configured; cannot update scan record.")
         return
 
     now = now_iso()
-
     events = [{
         "timestamp": now,
         "message": f"Lambda scan completed with status {status}. {detail}",
@@ -131,6 +97,51 @@ def append_scan_result(item_key: dict, status: str, detail: str, extra_events: l
 
 
 # ---------------------------------------------------------------------------
+# ClamAV path detection
+# ---------------------------------------------------------------------------
+
+def detect_clamav_paths():
+    """
+    Try to find clamscan, lib dir, and DB dir under /opt.
+    This handles both:
+      - zip root = bin/lib64/share  ->  /opt/bin, /opt/lib64, /opt/share/clamav
+      - zip root = opt/bin...       ->  /opt/opt/bin, /opt/opt/lib64, /opt/opt/share/clamav
+    """
+    bin_candidates = [
+        "/opt/bin/clamscan",
+        "/opt/opt/bin/clamscan",
+        "/usr/bin/clamscan",  # just in case
+    ]
+    lib_candidates = [
+        "/opt/lib64",
+        "/opt/opt/lib64",
+        "/opt/lib",
+        "/opt/opt/lib",
+    ]
+    db_candidates = [
+        "/opt/share/clamav",
+        "/opt/opt/share/clamav",
+    ]
+
+    clam_bin = next((p for p in bin_candidates if os.path.isfile(p)), None)
+    clam_lib = next((d for d in lib_candidates if os.path.isdir(d)), None)
+    clam_db = next((d for d in db_candidates if os.path.isdir(d)), None)
+
+    logger.info("Detected ClamAV paths: bin=%s lib=%s db=%s", clam_bin, clam_lib, clam_db)
+    return clam_bin, clam_lib, clam_db
+
+
+CLAMSCAN_PATH, CLAM_LIB_DIR, CLAM_DB_DIR = detect_clamav_paths()
+
+# configure env based on what we actually found
+if CLAM_LIB_DIR:
+    os.environ["LD_LIBRARY_PATH"] = f"{CLAM_LIB_DIR}:{os.environ.get('LD_LIBRARY_PATH', '')}"
+if CLAM_DB_DIR:
+    os.environ["CLAMAVDB"] = CLAM_DB_DIR
+os.environ["PATH"] = f"/opt/bin:{os.environ.get('PATH', '')}"
+
+
+# ---------------------------------------------------------------------------
 # Main handler
 # ---------------------------------------------------------------------------
 
@@ -153,7 +164,6 @@ def lambda_handler(event, context):
             )
             continue
 
-        # 1) Look up the latest DynamoDB record for this file_id
         ddb_item = find_latest_scan_record(file_id)
         if not ddb_item:
             logger.warning("No DynamoDB record found for file_id=%s; skipping", file_id)
@@ -164,7 +174,16 @@ def lambda_handler(event, context):
             "scan_timestamp": ddb_item["scan_timestamp"],
         }
 
-        # 2) Download the object to /tmp
+        # If clamscan is missing entirely, fail gracefully
+        if not CLAMSCAN_PATH:
+            detail = (
+                "ClamAV binary not found under /opt. "
+                "Check that the ClamAV Lambda layer is attached and packaged correctly."
+            )
+            append_scan_result(item_key, "ERROR", detail, [])
+            continue
+
+        # 1) Download object to /tmp
         local_path = f"/tmp/{os.path.basename(key)}"
         try:
             s3.download_file(bucket, key, local_path)
@@ -179,7 +198,7 @@ def lambda_handler(event, context):
             )
             continue
 
-        # 3) Mark record as IN_PROGRESS so the backend can show progress
+        # 2) Mark IN_PROGRESS
         try:
             scan_table.update_item(
                 Key=item_key,
@@ -202,7 +221,7 @@ def lambda_handler(event, context):
         except Exception as e:
             logger.exception("Failed to mark record IN_PROGRESS: %s", e)
 
-        # 4) Run ClamAV scan
+        # 3) Run ClamAV
         cmd = [CLAMSCAN_PATH, "--stdout", "--infected", local_path]
         logger.info("Running ClamAV: %s", " ".join(cmd))
 
@@ -230,13 +249,12 @@ def lambda_handler(event, context):
         stdout_tail = stdout[-2000:] if stdout else ""
         stderr_tail = stderr[-2000:] if stderr else ""
 
-        # 5) Interpret exit code → CLEAN / INFECTED / ERROR
+        # 4) Interpret result
         if exit_code == 0:
             status = "CLEAN"
             detail = "File is clean. ClamAV reported no malware."
         elif exit_code == 1:
             status = "INFECTED"
-            # Try to extract the first line ending with FOUND
             threat = None
             for line in stdout.splitlines():
                 if line.strip().endswith("FOUND"):
@@ -254,7 +272,7 @@ def lambda_handler(event, context):
             {"timestamp": now_iso(), "message": f"ClamAV stderr: {stderr_tail}"},
         ]
 
-        # 6) If CLEAN, optionally copy the file to a separate clean bucket
+        # 5) Optional: copy CLEAN files to CLEAN_BUCKET
         if status == "CLEAN" and CLEAN_BUCKET and CLEAN_BUCKET != bucket:
             try:
                 clean_key = key.replace("uploads/", "clean/", 1)
@@ -276,7 +294,7 @@ def lambda_handler(event, context):
                     "message": f"Failed to copy clean file to CLEAN_BUCKET: {e}",
                 })
 
-        # 7) Write final result back to DynamoDB
+        # 6) Final write
         append_scan_result(item_key, status, detail, extra_events)
 
     return {
