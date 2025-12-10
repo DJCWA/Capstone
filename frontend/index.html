@@ -739,15 +739,23 @@
       }
 
       function showAlert(container, type, message) {
+        // Render message as plain text so we never inject raw HTML from the backend
         container.innerHTML = "";
         const div = document.createElement("div");
         div.className =
           "alert " + (type === "error" ? "alert-error" : "alert-success");
         const icon = type === "error" ? "⚠️" : "✅";
-        div.innerHTML = `
-          <div class="alert-icon">${icon}</div>
-          <div class="alert-message">${message}</div>
-        `;
+
+        const iconDiv = document.createElement("div");
+        iconDiv.className = "alert-icon";
+        iconDiv.textContent = icon;
+
+        const msgDiv = document.createElement("div");
+        msgDiv.className = "alert-message";
+        msgDiv.textContent = message;
+
+        div.appendChild(iconDiv);
+        div.appendChild(msgDiv);
         container.appendChild(div);
       }
 
@@ -825,20 +833,30 @@
 
           if (!res.ok) {
             const text = await res.text().catch(() => "");
+            console.error(
+              "Upload failed with status",
+              res.status,
+              "body:",
+              text
+            );
             addTimelineEvent(
               "ERROR",
               `Upload failed (status ${res.status}).`
             );
+            // Do not inject the raw HTML/text from the backend into the page;
+            // just show a concise, user-friendly error.
+            const friendly =
+              res.status === 503
+                ? "Upload was blocked by a security or antivirus policy."
+                : "Upload failed. Please try again or contact support.";
             showAlert(
               uploadAlertContainer,
               "error",
-              `Upload failed with status ${res.status}${
-                text ? ": " + text : ""
-              }`
+              `Upload failed (status ${res.status}). ${friendly}`
             );
             setStatusState("error", {
               fileName: file.name,
-              message: "Upload failed. See error above.",
+              message: friendly,
             });
             return;
           }
