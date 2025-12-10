@@ -1,5 +1,8 @@
+// infra/s3_lambda.tf
+// S3 uploads bucket + Lambda scanner wiring
+
 ############################
-# S3 Uploads Bucket
+# Uploads bucket (source)
 ############################
 
 resource "aws_s3_bucket" "uploads" {
@@ -8,14 +11,23 @@ resource "aws_s3_bucket" "uploads" {
 
   tags = {
     Name        = "${var.app_name}-uploads"
-    Project     = var.app_name
     Environment = "prod"
+    Component   = "uploads"
+    Owner       = "group6"
   }
 }
 
-# Default SSE (AES-256) on the uploads bucket
-resource "aws_s3_bucket_server_side_encryption_configuration" "uploads_sse" {
+# Enable versioning on the source bucket (REQUIRED for replication)
+resource "aws_s3_bucket_versioning" "uploads_versioning" {
   bucket = aws_s3_bucket.uploads.id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "uploads_sse" {
+  bucket = aws_s3_bucket.uploads.bucket
 
   rule {
     apply_server_side_encryption_by_default {
@@ -24,161 +36,153 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "uploads_sse" {
   }
 }
 
-############################
-# Lambda IAM Role & Policy
-############################
+resource "aws_s3_bucket_public_access_block" "uploads_pab" {
+  bucket = aws_s3_bucket.uploads.id
 
-data "aws_caller_identity" "current" {}
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+############################
+# Lambda IAM role + policy
+############################
 
 data "aws_iam_policy_document" "scan_lambda_assume_role" {
   statement {
-    effect  = "Allow"
-    actions = ["sts:AssumeRole"]
+    effect = "Allow"
 
     principals {
       type        = "Service"
       identifiers = ["lambda.amazonaws.com"]
     }
+
+    actions = ["sts:AssumeRole"]
   }
 }
 
 resource "aws_iam_role" "scan_lambda_role" {
   name               = "${var.app_name}-scan-lambda-role"
   assume_role_policy = data.aws_iam_policy_document.scan_lambda_assume_role.json
+
+  tags = {
+    Name  = "${var.app_name}-scan-lambda-role"
+    Owner = "group6"
+  }
 }
 
-# Main permissions for Lambda:
-# - CloudWatch Logs
-# - Read from uploads bucket
-# - Read/Write to DynamoDB scan table
 data "aws_iam_policy_document" "scan_lambda_policy" {
+  # Read the uploaded file from the uploads bucket
   statement {
-    sid     = "AllowCloudWatchLogs"
-    effect  = "Allow"
-    actions = [
-      "logs:CreateLogGroup",
-      "logs:CreateLogStream",
-      "logs:PutLogEvents"
-    ]
+    sid    = "S3ReadWriteUploads"
+    effect = "Allow"
 
-    resources = [
-      "arn:aws:logs:${var.region}:${data.aws_caller_identity.current.account_id}:*"
-    ]
-  }
-
-  statement {
-    sid     = "AllowReadFromUploadsBucket"
-    effect  = "Allow"
     actions = [
       "s3:GetObject",
-      "s3:GetObjectVersion"
+      "s3:GetObjectVersion",
+      "s3:PutObject",
+      "s3:DeleteObject",
     ]
 
     resources = [
-      "${aws_s3_bucket.uploads.arn}/*"
+      "${aws_s3_bucket.uploads.arn}/*",
     ]
   }
 
+  # Update scan status records in DynamoDB
   statement {
-    sid     = "AllowScanTableAccess"
-    effect  = "Allow"
+    sid    = "DynamoDBScanResults"
+    effect = "Allow"
+
     actions = [
       "dynamodb:PutItem",
       "dynamodb:UpdateItem",
       "dynamodb:GetItem",
       "dynamodb:Query",
-      "dynamodb:Scan"
+      "dynamodb:Scan",
     ]
 
     resources = [
-      aws_dynamodb_table.scan_results.arn
+      aws_dynamodb_table.scan_results.arn,
     ]
+  }
+
+  # Write logs to CloudWatch (log group is auto-created by Lambda)
+  statement {
+    sid    = "CloudWatchLogs"
+    effect = "Allow"
+
+    actions = [
+      "logs:CreateLogStream",
+      "logs:PutLogEvents",
+      "logs:DescribeLogStreams",
+      "logs:CreateLogGroup",
+    ]
+
+    resources = ["arn:aws:logs:${var.region}:*:log-group:/aws/lambda/${var.app_name}-scan-lambda:*"]
   }
 }
 
-resource "aws_iam_policy" "scan_lambda_policy" {
+resource "aws_iam_role_policy" "scan_lambda_policy" {
   name   = "${var.app_name}-scan-lambda-policy"
+  role   = aws_iam_role.scan_lambda_role.id
   policy = data.aws_iam_policy_document.scan_lambda_policy.json
 }
 
-resource "aws_iam_role_policy_attachment" "scan_lambda_policy_attach" {
-  role       = aws_iam_role.scan_lambda_role.name
-  policy_arn = aws_iam_policy.scan_lambda_policy.arn
-}
-
-# Also attach the standard AWS managed basic execution policy for Lambda
-resource "aws_iam_role_policy_attachment" "scan_lambda_basic_logs" {
-  role       = aws_iam_role.scan_lambda_role.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
-}
-
 ############################
-# Lambda Function (ClamAV scan)
+# Lambda function
 ############################
 
 resource "aws_lambda_function" "scan_lambda" {
   function_name = "${var.app_name}-scan-lambda"
   role          = aws_iam_role.scan_lambda_role.arn
-
-  # Python 3.12, x86_64 as we discussed
   runtime       = "python3.12"
-  architectures = ["x86_64"]
   handler       = "handler.lambda_handler"
 
-  # Zip with your handler.py (you created this manually)
+  timeout     = 120
+  memory_size = 2048
+
+  # Zip file you created from lambda-scan/handler.py and placed in infra/
   filename         = "${path.module}/lambda-scan.zip"
   source_code_hash = filebase64sha256("${path.module}/lambda-scan.zip")
 
-  timeout      = 120
-  memory_size  = 2048
-
-  # Attach the pre-built ClamAV layer you created
+  # ClamAV layer ARN from your variable (points to the layer you created)
   layers = [
-    var.clamav_layer_arn
+    var.clamav_layer_arn,
   ]
 
   environment {
     variables = {
-      # Bucket where the backend uploads files
-      UPLOAD_BUCKET = aws_s3_bucket.uploads.bucket
-
-      # DynamoDB table that tracks scan status
-      SCAN_TABLE    = aws_dynamodb_table.scan_results.name
-
-      # Where the ClamAV databases live inside the layer
-      # (matches how the layer was built: /opt/share/clamav)
-      CLAMAV_DB_DIR = "/opt/share/clamav"
+      SCAN_TABLE = aws_dynamodb_table.scan_results.name
     }
   }
 
-  tags = {
-    Name        = "${var.app_name}-scan-lambda"
-    Project     = var.app_name
-    Environment = "prod"
-  }
-}
-
-# Optional: explicit log group with retention for the scan Lambda
-resource "aws_cloudwatch_log_group" "scan_lambda_log_group" {
-  name              = "/aws/lambda/${aws_lambda_function.scan_lambda.function_name}"
-  retention_in_days = 14
+  depends_on = [
+    aws_iam_role_policy.scan_lambda_policy,
+    aws_s3_bucket.uploads,
+    aws_s3_bucket_versioning.uploads_versioning,
+    aws_dynamodb_table.scan_results,
+  ]
 }
 
 ############################
-# S3 → Lambda Notification
+# Allow S3 to invoke Lambda
 ############################
 
-# Allow S3 to invoke the Lambda
-resource "aws_lambda_permission" "allow_s3_invoke_scan" {
-  statement_id  = "AllowExecutionFromUploadsBucket"
+resource "aws_lambda_permission" "allow_s3_invoke" {
+  statement_id  = "AllowS3Invoke"
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.scan_lambda.function_name
   principal     = "s3.amazonaws.com"
   source_arn    = aws_s3_bucket.uploads.arn
 }
 
-# Trigger Lambda for new objects in the "uploads/" prefix
-resource "aws_s3_bucket_notification" "uploads_scan_notification" {
+############################
+# S3 event -> Lambda trigger
+############################
+
+resource "aws_s3_bucket_notification" "uploads_notification" {
   bucket = aws_s3_bucket.uploads.id
 
   lambda_function {
@@ -188,6 +192,6 @@ resource "aws_s3_bucket_notification" "uploads_scan_notification" {
   }
 
   depends_on = [
-    aws_lambda_permission.allow_s3_invoke_scan
+    aws_lambda_permission.allow_s3_invoke,
   ]
 }

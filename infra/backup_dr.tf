@@ -158,15 +158,14 @@ resource "aws_s3_bucket_replication_configuration" "uploads_replication" {
       metrics {
         status = "Disabled"
       }
-
-      # We are NOT using S3 Replication Time Control, so we omit replication_time
     }
   }
 
-  # Make sure the IAM role and both buckets exist first
+  # Make sure IAM role and BOTH buckets (with versioning) exist first
   depends_on = [
     aws_iam_role_policy.s3_replication_policy,
     aws_s3_bucket.uploads,
+    aws_s3_bucket_versioning.uploads_versioning,
     aws_s3_bucket.uploads_dr,
     aws_s3_bucket_versioning.uploads_dr_versioning,
   ]
