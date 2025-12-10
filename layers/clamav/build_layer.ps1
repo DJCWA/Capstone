@@ -15,20 +15,33 @@ if (Test-Path $layerDir) {
 }
 New-Item -ItemType Directory -Path $layerDir | Out-Null
 
-# Remove any old zip
-$zipPath = Join-Path $ScriptDir "clamav-layer.zip"
-if (Test-Path $zipPath) {
-    Remove-Item $zipPath -Force
-}
+# This script runs INSIDE amazonlinux:2 and builds the layer under /build/layer
+# IMPORTANT: We do NOT include the virus DB here, only:
+#   - clamscan + freshclam binaries
+#   - needed shared libraries
+# The DB will be downloaded at runtime into /tmp/clamav by the Lambda function.
+$innerScript = @'
+set -e
 
-# Single-line shell script run INSIDE amazonlinux:2
-# - installs clamav + freshclam + zip
-# - copies clamscan/freshclam binaries
-# - finds and copies libclamav + deps into layer/lib64
-# - copies virus DB into layer/share/clamav
-# - moves everything under layer/opt
-# - zips to clamav-layer.zip in /build
-$innerScript = 'cd /build; yum -y install clamav clamav-update tar gzip zip; mkdir -p layer/bin layer/share/clamav layer/lib64; cp /usr/bin/clamscan layer/bin/ 2>/dev/null || true; cp /usr/bin/freshclam layer/bin/ 2>/dev/null || true; for lib in $(find /usr/lib64 /lib64 /usr/lib /lib -maxdepth 5 -type f \( -name "libclamav.so*" -o -name "libfreshclam.so*" -o -name "libjson-c.so*" -o -name "libpcre2-8.so*" \) 2>/dev/null); do cp -P "$lib" layer/lib64/ 2>/dev/null || true; done; freshclam || echo freshclam_failed; if [ -d /var/lib/clamav ]; then cp -r /var/lib/clamav/* layer/share/clamav/ 2>/dev/null || true; fi; mkdir -p layer/opt; mv layer/bin layer/share layer/lib64 layer/opt/ 2>/dev/null || true; zip -r clamav-layer.zip layer'
+cd /build
+
+yum -y install clamav clamav-update tar gzip
+
+mkdir -p layer/bin layer/lib64
+
+# Copy binaries (best effort)
+cp /usr/bin/clamscan layer/bin/ 2>/dev/null || true
+cp /usr/bin/freshclam layer/bin/ 2>/dev/null || true
+
+# Copy key shared libraries for ClamAV
+if [ -d /usr/lib64 ]; then
+  cp /usr/lib64/libclamav.so*     layer/lib64/ 2>/dev/null || true
+  cp /usr/lib64/libfreshclam.so*  layer/lib64/ 2>/dev/null || true
+fi
+
+echo "Contents of layer/ after build:"
+ls -R layer
+'@
 
 # Make sure Docker is available
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
@@ -36,10 +49,18 @@ if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
-# Run the Amazon Linux container, mounting this folder at /build
+# Run the Amazon Linux container to build the layer under C:\...\layers\clamav\layer
 docker run --rm `
   -v "${ScriptDir}:/build" `
   amazonlinux:2 `
   bash -lc "$innerScript"
+
+# Now create the ZIP on the HOST using PowerShell
+$zipPath = Join-Path $ScriptDir "clamav-layer.zip"
+if (Test-Path $zipPath) {
+    Remove-Item $zipPath -Force
+}
+
+Compress-Archive -Path (Join-Path $layerDir "*") -DestinationPath $zipPath -Force
 
 Write-Host "Done. Layer zip created at: $zipPath"
