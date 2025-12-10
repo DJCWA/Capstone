@@ -6,42 +6,18 @@ param()
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $ScriptDir
 
-Write-Host "Building ClamAV Lambda layer in: $ScriptDir"
+Write-Host "Building MINIMAL ClamAV Lambda layer in: $ScriptDir"
 
-# Clean and recreate the layer directory
-$layerDir = Join-Path $ScriptDir "layer"
-if (Test-Path $layerDir) {
-    Remove-Item -Recurse -Force $layerDir
+# This folder will map directly to /opt in the Lambda runtime
+$layerRoot = Join-Path $ScriptDir "opt_root"
+if (Test-Path $layerRoot) {
+    Remove-Item -Recurse -Force $layerRoot
 }
-New-Item -ItemType Directory -Path $layerDir | Out-Null
+New-Item -ItemType Directory -Path $layerRoot | Out-Null
 
-# This script runs INSIDE amazonlinux:2 and builds the layer under /build/layer
-# IMPORTANT: We do NOT include the virus DB here, only:
-#   - clamscan + freshclam binaries
-#   - needed shared libraries
-# The DB will be downloaded at runtime into /tmp/clamav by the Lambda function.
-$innerScript = @'
-set -e
-
-cd /build
-
-yum -y install clamav clamav-update tar gzip
-
-mkdir -p layer/bin layer/lib64
-
-# Copy binaries (best effort)
-cp /usr/bin/clamscan layer/bin/ 2>/dev/null || true
-cp /usr/bin/freshclam layer/bin/ 2>/dev/null || true
-
-# Copy key shared libraries for ClamAV
-if [ -d /usr/lib64 ]; then
-  cp /usr/lib64/libclamav.so*     layer/lib64/ 2>/dev/null || true
-  cp /usr/lib64/libfreshclam.so*  layer/lib64/ 2>/dev/null || true
-fi
-
-echo "Contents of layer/ after build:"
-ls -R layer
-'@
+# Single-line shell script to avoid CRLF issues.
+# IMPORTANT: paste this as ONE line between the single quotes.
+$innerScript = 'cd /build; yum -y install clamav clamav-update tar gzip; mkdir -p opt_root/bin opt_root/lib64; cp /usr/bin/clamscan opt_root/bin/ 2>/dev/null || true; cp /usr/bin/freshclam opt_root/bin/ 2>/dev/null || true; cp /usr/lib64/libclamav.so* opt_root/lib64/ 2>/dev/null || true; cp /usr/lib64/libfreshclam.so* opt_root/lib64/ 2>/dev/null || true;'
 
 # Make sure Docker is available
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
@@ -49,7 +25,7 @@ if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
-# Run the Amazon Linux container to build the layer under C:\...\layers\clamav\layer
+# Run the Amazon Linux 2 container to build the layer in C:\...\layers\clamav\opt_root
 docker run --rm `
   -v "${ScriptDir}:/build" `
   amazonlinux:2 `
@@ -61,6 +37,9 @@ if (Test-Path $zipPath) {
     Remove-Item $zipPath -Force
 }
 
-Compress-Archive -Path (Join-Path $layerDir "*") -DestinationPath $zipPath -Force
+# Zip the CONTENTS of opt_root so the runtime sees:
+#   /opt/bin/...
+#   /opt/lib64/...
+Compress-Archive -Path (Join-Path $layerRoot "*") -DestinationPath $zipPath -Force
 
 Write-Host "Done. Layer zip created at: $zipPath"
