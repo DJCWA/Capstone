@@ -1,10 +1,58 @@
-############################################
-# Cross-region S3 replication for DR
-# - Primary bucket: aws_s3_bucket.uploads (var.region)
-# - DR bucket:      aws_s3_bucket.uploads_dr (var.dr_region via provider alias "dr")
-############################################
+// infra/backup_dr.tf
+// Cross-region S3 replication for scanned uploads (primary -> DR region)
 
-# IAM trust policy: allow S3 to assume the replication role
+############################
+# DR S3 bucket (target)
+############################
+
+resource "aws_s3_bucket" "uploads_dr" {
+  provider = aws.dr
+  bucket   = "${var.app_name}-uploads-dr"
+
+  force_destroy = true
+
+  tags = {
+    Name        = "${var.app_name}-uploads-dr"
+    Environment = "prod"
+    Component   = "dr-uploads"
+    Owner       = "group6"
+  }
+}
+
+resource "aws_s3_bucket_versioning" "uploads_dr_versioning" {
+  provider = aws.dr
+  bucket   = aws_s3_bucket.uploads_dr.id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "uploads_dr_sse" {
+  provider = aws.dr
+  bucket   = aws_s3_bucket.uploads_dr.bucket
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "uploads_dr_pab" {
+  provider = aws.dr
+  bucket   = aws_s3_bucket.uploads_dr.id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+############################
+# Replication IAM Role
+############################
+
 data "aws_iam_policy_document" "s3_replication_assume_role" {
   statement {
     effect = "Allow"
@@ -18,52 +66,64 @@ data "aws_iam_policy_document" "s3_replication_assume_role" {
   }
 }
 
-# IAM role S3 uses for replication
 resource "aws_iam_role" "s3_replication_role" {
   name               = "${var.app_name}-s3-replication-role"
   assume_role_policy = data.aws_iam_policy_document.s3_replication_assume_role.json
+
+  tags = {
+    Name  = "${var.app_name}-s3-replication-role"
+    Owner = "group6"
+  }
 }
 
-# IAM policy attached to the replication role
 data "aws_iam_policy_document" "s3_replication_policy" {
-  # Allow S3 to read replication configuration and list the source bucket
+  # Allow S3 to read from source bucket (primary region)
   statement {
+    sid    = "AllowReplicationConfigOnSource"
     effect = "Allow"
+
     actions = [
       "s3:GetReplicationConfiguration",
-      "s3:ListBucket"
+      "s3:ListBucket",
     ]
+
     resources = [
-      aws_s3_bucket.uploads.arn
+      aws_s3_bucket.uploads.arn,
     ]
   }
 
-  # Allow S3 to read versions and metadata from the source bucket
   statement {
+    sid    = "AllowObjectReadsFromSource"
     effect = "Allow"
+
     actions = [
       "s3:GetObjectVersion",
       "s3:GetObjectVersionAcl",
-      "s3:GetObjectVersionTagging"
+      "s3:GetObjectVersionTagging",
     ]
+
     resources = [
-      "${aws_s3_bucket.uploads.arn}/*"
+      "${aws_s3_bucket.uploads.arn}/*",
     ]
   }
 
-  # Allow S3 to replicate into the DR bucket
+  # Allow writes into destination (DR bucket)
   statement {
+    sid    = "AllowReplicationToDestination"
     effect = "Allow"
+
     actions = [
       "s3:ReplicateObject",
       "s3:ReplicateDelete",
       "s3:ReplicateTags",
       "s3:GetObjectVersionTagging",
-      "s3:PutObjectVersionTagging",
-      "s3:ObjectOwnerOverrideToBucketOwner"
+      "s3:PutBucketVersioning",
+      "s3:PutBucketTagging",
     ]
+
     resources = [
-      "${aws_s3_bucket.uploads_dr.arn}/*"
+      aws_s3_bucket.uploads_dr.arn,
+      "${aws_s3_bucket.uploads_dr.arn}/*",
     ]
   }
 }
@@ -74,63 +134,40 @@ resource "aws_iam_role_policy" "s3_replication_policy" {
   policy = data.aws_iam_policy_document.s3_replication_policy.json
 }
 
-############################################
-# DR bucket in secondary region
-############################################
-
-resource "aws_s3_bucket" "uploads_dr" {
-  provider = aws.dr
-
-  bucket = "${var.app_name}-uploads-dr"
-
-  force_destroy = true
-
-  tags = {
-    Name        = "${var.app_name}-uploads-dr"
-    Environment = "prod"
-    Component   = "dr"
-  }
-}
-
-# Enable versioning on DR bucket (required for replication)
-resource "aws_s3_bucket_versioning" "uploads_dr_versioning" {
-  provider = aws.dr
-  bucket   = aws_s3_bucket.uploads_dr.id
-
-  versioning_configuration {
-    status = "Enabled"
-  }
-}
-
-############################################
-# Replication configuration on primary bucket
-############################################
+############################
+# S3 Replication Configuration
+############################
 
 resource "aws_s3_bucket_replication_configuration" "uploads_replication" {
+  # Source bucket is defined in s3_lambda.tf as aws_s3_bucket.uploads
   bucket = aws_s3_bucket.uploads.id
   role   = aws_iam_role.s3_replication_role.arn
 
   rule {
-    id     = "replicate-to-dr"
+    id     = "replicate-clean-uploads"
     status = "Enabled"
 
-    delete_marker_replication {
-      status = "Enabled"
-    }
-
-    filter {
-      prefix = ""
-    }
+    # Replicate everything in the bucket
+    filter {}
 
     destination {
       bucket        = aws_s3_bucket.uploads_dr.arn
       storage_class = "STANDARD"
+
+      # Optional metrics; not required for basic DR
+      metrics {
+        status = "Disabled"
+      }
+
+      # We are NOT using S3 Replication Time Control, so we omit replication_time
     }
   }
 
-  # Ensure versioning is enabled on both buckets before replication is applied
+  # Make sure the IAM role and both buckets exist first
   depends_on = [
-    aws_s3_bucket_versioning.uploads_versioning,
-    aws_s3_bucket_versioning.uploads_dr_versioning
+    aws_iam_role_policy.s3_replication_policy,
+    aws_s3_bucket.uploads,
+    aws_s3_bucket.uploads_dr,
+    aws_s3_bucket_versioning.uploads_dr_versioning,
   ]
 }
