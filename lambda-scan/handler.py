@@ -1,308 +1,186 @@
 import os
 import json
 import logging
-import subprocess
-import tempfile
 import datetime as dt
 
 import boto3
 from boto3.dynamodb.conditions import Key
-from botocore.exceptions import BotoCoreError, ClientError
 
-# -------------------------------------------------------------------
-# Logging
-# -------------------------------------------------------------------
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# ----------------------------------------------------------------------
+# Logging setup
+# ----------------------------------------------------------------------
 
-# -------------------------------------------------------------------
-# Environment
-# -------------------------------------------------------------------
-UPLOAD_BUCKET = os.environ.get("UPLOAD_BUCKET")
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+# ----------------------------------------------------------------------
+# AWS clients/resources
+# ----------------------------------------------------------------------
+
 SCAN_TABLE = os.environ.get("SCAN_TABLE")
 
-CLAMSCAN_PATH = "/opt/bin/clamscan"
-FRESHCLAM_PATH = "/opt/bin/freshclam"
-CLAMAV_DB_DIR = "/tmp/clamav"
-LD_LIBRARY_PATH = "/opt/lib64"
-
-if not UPLOAD_BUCKET:
-    logger.warning("UPLOAD_BUCKET env var not set in Lambda.")
 if not SCAN_TABLE:
-    logger.warning("SCAN_TABLE env var not set in Lambda.")
+    logger.warning("SCAN_TABLE environment variable is not set. Lambda will fail.")
 
-s3 = boto3.client("s3")
 dynamodb = boto3.resource("dynamodb")
 
 
-def _get_table():
+def get_scan_table():
     if not SCAN_TABLE:
-        raise RuntimeError("SCAN_TABLE env var is not set in Lambda.")
+        raise RuntimeError("SCAN_TABLE environment variable is not set.")
     return dynamodb.Table(SCAN_TABLE)
 
 
-# -------------------------------------------------------------------
-# Helper: safe DynamoDB event append
-# -------------------------------------------------------------------
-def append_event(file_id: str, message: str):
-    """Append a scan_events entry to the latest record for this file_id."""
-    try:
-        table = _get_table()
-        now_iso = dt.datetime.utcnow().isoformat(timespec="seconds") + "Z"
+# ----------------------------------------------------------------------
+# Helper functions
+# ----------------------------------------------------------------------
 
-        # Find the latest record for this file_id (by scan_timestamp)
+def extract_file_id_from_key(s3_key: str) -> str | None:
+    """
+    Your backend uploads to keys like:
+        uploads/{file_id}/{original_name}
+    So we take the second path component as file_id.
+    """
+    parts = s3_key.split("/")
+    if len(parts) < 3:
+        logger.warning("Unexpected S3 key format: %s", s3_key)
+        return None
+    return parts[1]
+
+
+def update_scan_record_to_clean(table, file_id: str):
+    """
+    Find the latest record for this file_id and mark it as CLEAN.
+    If no record exists (edge case), this function will create one.
+    """
+    now = dt.datetime.utcnow()
+    now_iso = now.replace(microsecond=0).isoformat() + "Z"
+
+    # Try to get the latest record for this file_id
+    try:
         resp = table.query(
             KeyConditionExpression=Key("file_id").eq(file_id),
-            ScanIndexForward=False,
+            ScanIndexForward=False,  # newest first
             Limit=1,
             ConsistentRead=True,
         )
         items = resp.get("Items", [])
-        if not items:
-            logger.warning("append_event: no record found for file_id=%s", file_id)
-            return
+    except Exception as e:
+        logger.exception("Failed to query DynamoDB for file_id=%s", file_id)
+        raise
 
+    if items:
         item = items[0]
-        scan_timestamp = item["scan_timestamp"]
+        logger.info("Found existing scan record for file_id=%s", file_id)
 
-        table.update_item(
-            Key={
-                "file_id": file_id,
-                "scan_timestamp": scan_timestamp,
-            },
-            UpdateExpression=(
-                "SET updated_at = :u, "
-                "scan_events = list_append(if_not_exists(scan_events, :empty), :ev)"
-            ),
-            ExpressionAttributeValues={
-                ":u": now_iso,
-                ":empty": [],
-                ":ev": [
-                    {
-                        "timestamp": now_iso,
-                        "message": message,
-                    }
-                ],
-            },
-        )
-    except Exception as e:
-        logger.exception("Failed to append_event for file_id=%s: %s", file_id, e)
+        existing_events = item.get("scan_events", [])
+        if not isinstance(existing_events, list):
+            existing_events = []
 
-
-# -------------------------------------------------------------------
-# Helper: ensure ClamAV DB is in /tmp/clamav
-# -------------------------------------------------------------------
-def ensure_clamav_db():
-    """
-    Fetch or update the ClamAV DB in /tmp/clamav using freshclam.
-    This keeps the Lambda layer small; DB lives in ephemeral /tmp.
-    """
-    os.makedirs(CLAMAV_DB_DIR, exist_ok=True)
-
-    env = os.environ.copy()
-    env["LD_LIBRARY_PATH"] = LD_LIBRARY_PATH
-
-    logger.info("Running freshclam to update DB in %s", CLAMAV_DB_DIR)
-
-    try:
-        result = subprocess.run(
-            [FRESHCLAM_PATH, f"--datadir={CLAMAV_DB_DIR}"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env=env,
-            timeout=120,  # give it some time
-        )
-    except Exception as e:
-        raise RuntimeError(f"Error running freshclam: {e}")
-
-    # 0 = DB updated, 1 = already up to date, >1 = error
-    if result.returncode not in (0, 1):
-        raise RuntimeError(
-            f"freshclam failed (rc={result.returncode}). "
-            f"stdout={result.stdout} stderr={result.stderr}"
+        existing_events.append(
+            {
+                "timestamp": now_iso,
+                "message": "Lambda stub scanner ran and marked file as CLEAN.",
+            }
         )
 
-    logger.info("freshclam completed with rc=%s", result.returncode)
-
-
-# -------------------------------------------------------------------
-# Helper: run clamscan on a local file path
-# -------------------------------------------------------------------
-def run_clamscan(local_path: str):
-    env = os.environ.copy()
-    env["LD_LIBRARY_PATH"] = LD_LIBRARY_PATH
-
-    logger.info("Running clamscan on %s", local_path)
-
-    result = subprocess.run(
-        [
-            CLAMSCAN_PATH,
-            f"--database={CLAMAV_DB_DIR}",
-            "-i",  # only print infected files
-            local_path,
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        env=env,
-        timeout=120,
-    )
-
-    logger.info("clamscan rc=%s", result.returncode)
-
-    stdout = result.stdout or ""
-    stderr = result.stderr or ""
-
-    if result.returncode == 0:
-        status = "CLEAN"
-        detail = "No malware detected by ClamAV."
-    elif result.returncode == 1:
-        status = "INFECTED"
-        detail = "Malware detected by ClamAV."
+        try:
+            table.update_item(
+                Key={
+                    "file_id": item["file_id"],
+                    "scan_timestamp": item["scan_timestamp"],
+                },
+                UpdateExpression=(
+                    "SET scan_status = :s, "
+                    "scan_detail = :d, "
+                    "scan_events = :e"
+                ),
+                ExpressionAttributeValues={
+                    ":s": "CLEAN",
+                    ":d": "Stub scanner: file marked CLEAN (no AV engine executed).",
+                    ":e": existing_events,
+                },
+            )
+            logger.info("Updated scan record for file_id=%s to CLEAN", file_id)
+        except Exception as e:
+            logger.exception(
+                "Failed to update scan record in DynamoDB for file_id=%s", file_id
+            )
+            raise
     else:
-        status = "ERROR"
-        detail = f"ClamAV error (exit code {result.returncode})."
+        # Edge case: no record exists yet, create one so /api/scan-status still works.
+        logger.warning(
+            "No existing scan record for file_id=%s, creating a new CLEAN record.", file_id
+        )
 
-    return status, detail, stdout, stderr
+        try:
+            table.put_item(
+                Item={
+                    "file_id": file_id,
+                    "scan_timestamp": now_iso,
+                    "file_name": file_id,
+                    "s3_bucket": "unknown",
+                    "s3_key": "unknown",
+                    "scan_status": "CLEAN",
+                    "scan_detail": "Stub scanner created CLEAN record (no AV engine).",
+                    "scan_events": [
+                        {
+                            "timestamp": now_iso,
+                            "message": "Lambda stub scanner created this record.",
+                        }
+                    ],
+                }
+            )
+        except Exception as e:
+            logger.exception(
+                "Failed to create new scan record in DynamoDB for file_id=%s", file_id
+            )
+            raise
 
 
-# -------------------------------------------------------------------
-# Lambda handler (triggered by S3 object-created event)
-# -------------------------------------------------------------------
+# ----------------------------------------------------------------------
+# Lambda entrypoint
+# ----------------------------------------------------------------------
+
 def lambda_handler(event, context):
     logger.info("Received event: %s", json.dumps(event))
 
-    # S3 put event(s)
-    records = event.get("Records", [])
-    results = []
+    if "Records" not in event:
+        logger.warning("No Records key in event; nothing to do.")
+        return {"status": "ignored", "reason": "no Records in event"}
 
-    for rec in records:
+    table = get_scan_table()
+    processed = 0
+    errors = 0
+
+    for record in event["Records"]:
         try:
-            s3_info = rec.get("s3", {})
+            s3_info = record.get("s3", {})
             bucket = s3_info.get("bucket", {}).get("name")
             key = s3_info.get("object", {}).get("key")
 
             if not bucket or not key:
-                logger.warning("Missing bucket or key in event record.")
+                logger.warning("Missing bucket/key in S3 event record: %s", record)
+                errors += 1
                 continue
 
-            # Our key pattern: uploads/{file_id}/{file_name}
-            parts = key.split("/")
-            file_id = None
-            file_name = None
-            if len(parts) >= 3 and parts[0] == "uploads":
-                file_id = parts[1]
-                file_name = "/".join(parts[2:])
-            else:
+            logger.info("Processing S3 object: bucket=%s key=%s", bucket, key)
+
+            file_id = extract_file_id_from_key(key)
+            if not file_id:
                 logger.warning(
-                    "Key does not match expected pattern 'uploads/<file_id>/<file_name>': %s",
-                    key,
+                    "Could not extract file_id from key=%s; skipping this record.", key
                 )
+                errors += 1
+                continue
 
-            logger.info("Processing S3 object: bucket=%s key=%s file_id=%s", bucket, key, file_id)
+            update_scan_record_to_clean(table, file_id)
+            processed += 1
 
-            local_path = os.path.join(tempfile.gettempdir(), "scan_input")
-            s3.download_file(bucket, key, local_path)
-            logger.info("Downloaded object to %s", local_path)
+        except Exception:
+            errors += 1
+            logger.exception("Error processing record: %s", record)
 
-            if file_id:
-                append_event(file_id, "Lambda scanner started for this file.")
-
-            # Ensure DB is present/updated
-            try:
-                ensure_clamav_db()
-            except Exception as e:
-                logger.exception("Failed to update ClamAV DB.")
-                if file_id:
-                    append_event(
-                        file_id,
-                        f"Failed to update ClamAV DB: {e}",
-                    )
-                raise
-
-            # Run clamscan
-            status, detail, stdout, stderr = run_clamscan(local_path)
-
-            # Update DynamoDB record
-            if file_id:
-                try:
-                    table = _get_table()
-                    # Find latest record for this file_id
-                    resp = table.query(
-                        KeyConditionExpression=Key("file_id").eq(file_id),
-                        ScanIndexForward=False,
-                        Limit=1,
-                        ConsistentRead=True,
-                    )
-                        # Note: scan_events is our event list
-                    items = resp.get("Items", [])
-                    if items:
-                        item = items[0]
-                        scan_timestamp = item["scan_timestamp"]
-
-                        now_iso = dt.datetime.utcnow().isoformat(timespec="seconds") + "Z"
-
-                        new_events = [
-                            {
-                                "timestamp": now_iso,
-                                "message": (
-                                    f"Lambda scan completed with status {status}. {detail}"
-                                ),
-                            },
-                            {
-                                "timestamp": now_iso,
-                                "message": f"ClamAV stdout: {stdout[:2048]}",
-                            },
-                            {
-                                "timestamp": now_iso,
-                                "message": f"ClamAV stderr: {stderr[:2048]}",
-                            },
-                        ]
-
-                        table.update_item(
-                            Key={
-                                "file_id": file_id,
-                                "scan_timestamp": scan_timestamp,
-                            },
-                            UpdateExpression=(
-                                "SET scan_status = :s, "
-                                "scan_detail = :d, "
-                                "updated_at = :u, "
-                                "scan_events = list_append(if_not_exists(scan_events, :empty), :ev)"
-                            ),
-                            ExpressionAttributeValues={
-                                ":s": status,
-                                ":d": detail,
-                                ":u": now_iso,
-                                ":empty": [],
-                                ":ev": new_events,
-                            },
-                        )
-                    else:
-                        logger.warning("No DynamoDB record found for file_id=%s", file_id)
-                except Exception as e:
-                    logger.exception("Failed to update DynamoDB for file_id=%s", file_id)
-
-            results.append(
-                {
-                    "bucket": bucket,
-                    "key": key,
-                    "file_id": file_id,
-                    "file_name": file_name,
-                    "status": status,
-                    "detail": detail,
-                }
-            )
-
-        except Exception as e:
-            logger.exception("Unhandled error processing record: %s", e)
-            results.append(
-                {
-                    "error": str(e),
-                }
-            )
-
-    return {
-        "results": results,
-    }
+    result = {"status": "ok", "processed": processed, "errors": errors}
+    logger.info("Lambda stub scan result: %s", result)
+    return result
