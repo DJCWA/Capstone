@@ -450,6 +450,30 @@
 
       .alert-message {
         flex: 1;
+        max-height: 220px;
+        overflow-y: auto;
+      }
+
+      .raw-error-snippet {
+        margin-top: 6px;
+        max-height: 180px;
+        overflow-y: auto;
+        padding: 4px 6px;
+        border-radius: 8px;
+        background: rgba(15, 23, 42, 0.9);
+        border: 1px solid rgba(148, 163, 184, 0.5);
+      }
+
+      .raw-error-snippet h1,
+      .raw-error-snippet h2,
+      .raw-error-snippet h3 {
+        font-size: 0.96rem;
+        margin: 0 0 0.35rem;
+      }
+
+      .raw-error-snippet p {
+        font-size: 0.78rem;
+        margin: 0.2rem 0;
       }
 
       .alert-success {
@@ -631,8 +655,6 @@
 
     <script>
       // === CONFIG ===
-      // If your backend is behind the same ALB with path-based routing,
-      // /api/* will go to the backend service. Adjust if needed.
       const API_BASE = "/api";
 
       const fileInput = document.getElementById("fileInput");
@@ -738,24 +760,31 @@
         timelineEl.scrollTop = timelineEl.scrollHeight;
       }
 
+      function sanitizeHtmlSnippet(html) {
+        if (!html) return "";
+        let cleaned = String(html);
+
+        // Remove script and style blocks to avoid global CSS/JS issues
+        cleaned = cleaned.replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, "");
+        cleaned = cleaned.replace(/<style[\s\S]*?>[\s\S]*?<\/style>/gi, "");
+
+        // Strip outer HTML/HEAD/BODY/TITLE and doctype
+        cleaned = cleaned.replace(/<!doctype[^>]*>/gi, "");
+        cleaned = cleaned.replace(/<\/?(html|head|body|title)[^>]*>/gi, "");
+
+        return cleaned.trim();
+      }
+
       function showAlert(container, type, message) {
-        // Render message as plain text so we never inject raw HTML from the backend
         container.innerHTML = "";
         const div = document.createElement("div");
         div.className =
           "alert " + (type === "error" ? "alert-error" : "alert-success");
         const icon = type === "error" ? "⚠️" : "✅";
-
-        const iconDiv = document.createElement("div");
-        iconDiv.className = "alert-icon";
-        iconDiv.textContent = icon;
-
-        const msgDiv = document.createElement("div");
-        msgDiv.className = "alert-message";
-        msgDiv.textContent = message;
-
-        div.appendChild(iconDiv);
-        div.appendChild(msgDiv);
+        div.innerHTML = `
+          <div class="alert-icon">${icon}</div>
+          <div class="alert-message">${message}</div>
+        `;
         container.appendChild(div);
       }
 
@@ -833,30 +862,28 @@
 
           if (!res.ok) {
             const text = await res.text().catch(() => "");
-            console.error(
-              "Upload failed with status",
-              res.status,
-              "body:",
-              text
-            );
+            console.error("Upload failed with status", res.status, "body:", text);
+
             addTimelineEvent(
               "ERROR",
               `Upload failed (status ${res.status}).`
             );
-            // Do not inject the raw HTML/text from the backend into the page;
-            // just show a concise, user-friendly error.
-            const friendly =
-              res.status === 503
-                ? "Upload was blocked by a security or antivirus policy."
-                : "Upload failed. Please try again or contact support.";
-            showAlert(
-              uploadAlertContainer,
-              "error",
-              `Upload failed (status ${res.status}). ${friendly}`
-            );
+
+            const cleaned = sanitizeHtmlSnippet(text);
+            const htmlMessage =
+              `<strong>Upload failed (status ${res.status}).</strong>` +
+              (cleaned
+                ? `<div class="raw-error-snippet">${cleaned}</div>`
+                : "");
+
+            showAlert(uploadAlertContainer, "error", htmlMessage);
+
             setStatusState("error", {
               fileName: file.name,
-              message: friendly,
+              message:
+                res.status === 503
+                  ? "Upload was blocked by a security or antivirus policy."
+                  : "Upload failed. See details above.",
             });
             return;
           }
@@ -876,7 +903,6 @@
           setStatusState("pending", { fileName: file.name });
 
           if (!currentFileId) {
-            // If backend does not yet return an ID, we just stop here.
             addTimelineEvent(
               "INFO",
               "Backend did not return a file_id. Live polling is not available."
