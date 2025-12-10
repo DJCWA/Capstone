@@ -28,16 +28,33 @@ resource "aws_iam_role" "backup_role" {
   }
 }
 
-resource "aws_iam_role_policy_attachment" "backup_role_policy" {
+# Attach the AWS managed policies for backup + restore
+resource "aws_iam_role_policy_attachment" "backup_role_backup" {
   role       = aws_iam_role.backup_role.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForBackup"
 }
 
-resource "aws_backup_vault" "main" {
+resource "aws_iam_role_policy_attachment" "backup_role_restore" {
+  role       = aws_iam_role.backup_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForRestores"
+}
+
+resource "aws_backup_vault" "primary" {
   name = "${var.app_name}-backup-vault"
 
   tags = {
     Project = var.app_name
+    Scope   = "primary"
+  }
+}
+
+resource "aws_backup_vault" "dr" {
+  provider = aws.dr
+  name     = "${var.app_name}-backup-vault-dr"
+
+  tags = {
+    Project = var.app_name
+    Scope   = "dr"
   }
 }
 
@@ -45,23 +62,23 @@ resource "aws_backup_plan" "daily" {
   name = "${var.app_name}-daily-backup-plan"
 
   rule {
-    rule_name         = "daily-backup"
-    target_vault_name = aws_backup_vault.main.name
-
-    # Daily at 05:00 UTC – adjust if needed
-    schedule = "cron(0 5 * * ? *)"
+    rule_name         = "${var.app_name}-daily-rule"
+    target_vault_name = aws_backup_vault.primary.name
+    schedule          = "cron(0 2 * * ? *)" # Daily at 02:00 UTC
 
     lifecycle {
-      delete_after = 30
+      cold_storage_after = 30
+      delete_after       = 365
     }
   }
 
   tags = {
     Project = var.app_name
+    Type    = "daily-backup"
   }
 }
 
-# Back up the DynamoDB scan results table (defined in dynamodb.tf as aws_dynamodb_table.scan_results)
+# Select the DynamoDB scan_results table for this plan
 resource "aws_backup_selection" "dynamodb_selection" {
   name         = "${var.app_name}-dynamodb-selection"
   plan_id      = aws_backup_plan.daily.id
@@ -75,14 +92,10 @@ resource "aws_backup_selection" "dynamodb_selection" {
 # --------------------------------------
 # S3 Cross-Region Replication for Uploads
 # --------------------------------------
-# Uses:
-#   - aws_s3_bucket.uploads (defined in s3_lambda.tf)
-#   - aws_s3_bucket.uploads_dr (defined below in this file using the DR provider)
-#   - aws_s3_bucket_versioning.uploads_versioning (defined in s3_lambda.tf)
-#   - aws_s3_bucket_versioning.uploads_dr_versioning (defined below in this file)
-#
+# Source bucket is aws_s3_bucket.uploads (defined in s3_lambda.tf)
+# DR bucket + versioning are defined below in this file.
 
-# DR uploads bucket in the DR region
+# DR destination bucket in the secondary region
 resource "aws_s3_bucket" "uploads_dr" {
   provider      = aws.dr
   bucket        = "${var.app_name}-uploads-dr"
@@ -96,7 +109,7 @@ resource "aws_s3_bucket" "uploads_dr" {
   }
 }
 
-# Enable versioning on the DR bucket (required for replication)
+# Versioning for DR bucket (required for replication)
 resource "aws_s3_bucket_versioning" "uploads_dr_versioning" {
   provider = aws.dr
   bucket   = aws_s3_bucket.uploads_dr.id
@@ -196,8 +209,9 @@ resource "aws_s3_bucket_replication_configuration" "uploads_replication" {
     id     = "replicate-all-objects"
     status = "Enabled"
 
+    # Required by the current CRR schema even if you don't customize markers
     delete_marker_replication {
-      status = "Disabled"
+      status = "Enabled"
     }
 
     filter {
