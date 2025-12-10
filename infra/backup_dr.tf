@@ -48,7 +48,7 @@ resource "aws_backup_plan" "daily" {
     rule_name         = "daily-backup"
     target_vault_name = aws_backup_vault.main.name
 
-    # Daily at 05:00 UTC – adjust if you want
+    # Daily at 05:00 UTC – adjust if needed
     schedule = "cron(0 5 * * ? *)"
 
     lifecycle {
@@ -61,14 +61,14 @@ resource "aws_backup_plan" "daily" {
   }
 }
 
-# Back up the DynamoDB scan table (defined in dynamodb.tf as aws_dynamodb_table.scan_table)
+# Back up the DynamoDB scan results table (defined in dynamodb.tf as aws_dynamodb_table.scan_results)
 resource "aws_backup_selection" "dynamodb_selection" {
-  name          = "${var.app_name}-dynamodb-selection"
-  backup_plan_id = aws_backup_plan.daily.id
-  iam_role_arn   = aws_iam_role.backup_role.arn
+  name         = "${var.app_name}-dynamodb-selection"
+  plan_id      = aws_backup_plan.daily.id
+  iam_role_arn = aws_iam_role.backup_role.arn
 
   resources = [
-    aws_dynamodb_table.scan_table.arn
+    aws_dynamodb_table.scan_results.arn
   ]
 }
 
@@ -76,11 +76,35 @@ resource "aws_backup_selection" "dynamodb_selection" {
 # S3 Cross-Region Replication for Uploads
 # --------------------------------------
 # Uses:
-#   - aws_s3_bucket.uploads
-#   - aws_s3_bucket.uploads_dr
-#   - aws_s3_bucket_versioning.uploads_versioning
-#   - aws_s3_bucket_versioning.uploads_dr_versioning
-# all defined in s3_lambda.tf
+#   - aws_s3_bucket.uploads (defined in s3_lambda.tf)
+#   - aws_s3_bucket.uploads_dr (defined below in this file using the DR provider)
+#   - aws_s3_bucket_versioning.uploads_versioning (defined in s3_lambda.tf)
+#   - aws_s3_bucket_versioning.uploads_dr_versioning (defined below in this file)
+#
+
+# DR uploads bucket in the DR region
+resource "aws_s3_bucket" "uploads_dr" {
+  provider      = aws.dr
+  bucket        = "${var.app_name}-uploads-dr"
+  force_destroy = true
+
+  tags = {
+    Name        = "${var.app_name}-uploads-dr"
+    Environment = "prod"
+    Component   = "uploads-dr"
+    Owner       = "group6"
+  }
+}
+
+# Enable versioning on the DR bucket (required for replication)
+resource "aws_s3_bucket_versioning" "uploads_dr_versioning" {
+  provider = aws.dr
+  bucket   = aws_s3_bucket.uploads_dr.id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
 
 data "aws_iam_policy_document" "s3_replication_policy" {
   # Allow S3 to read replication configuration and list the source bucket
@@ -172,7 +196,6 @@ resource "aws_s3_bucket_replication_configuration" "uploads_replication" {
     id     = "replicate-all-objects"
     status = "Enabled"
 
-    # ✅ Required by the new CRR schema
     delete_marker_replication {
       status = "Disabled"
     }
